@@ -25,72 +25,84 @@ from mjlab.utils.wrappers import VideoRecorder
 from mjlab.viewer import NativeMujocoViewer, ViserPlayViewer
 
 class WireAssistWrapper:
-    """ロボットの姿勢を監視し、転倒しそうな時に外力を加えるラッパー (Native Viewer / 自動前進対応版)"""
-    def __init__(self, env, pitch_threshold=0.15, tension=85.0):
+    """ロボットの姿勢を監視しつつ、毎ステップで前進コマンドを強制的に上書きするラッパー。"""
+    def __init__(self, env, pitch_threshold=0.15, tension=85.0, lin_vel_x=1.0, lin_vel_y=0.0, yaw_vel=0.0):
         self.env = env
         self.pitch_threshold = pitch_threshold
-        self.tension = tension 
-        
-        vec_fwd = np.array([-0.2, 0.0, 1.0]) 
+        self.tension = tension
+        self.lin_vel_x = lin_vel_x
+        self.lin_vel_y = lin_vel_y
+        self.yaw_vel = yaw_vel
+
+        vec_fwd = np.array([-0.2, 0.0, 1.0])
         self.dir_fwd = vec_fwd / np.linalg.norm(vec_fwd)
-        
+
         vec_bwd = np.array([0.2, 0.0, 1.0])
         self.dir_bwd = vec_bwd / np.linalg.norm(vec_bwd)
 
         self.mj_model = getattr(env.unwrapped, "model", None) or getattr(getattr(env.unwrapped, "sim", None), "model", None)
         self.mj_data = getattr(env.unwrapped, "data", None) or getattr(getattr(env.unwrapped, "sim", None), "data", None)
         native_model = getattr(self.mj_model, "mj_model", None) or getattr(getattr(env.unwrapped, "sim", None), "mj_model", None)
-        
+
         self.body_id = -1
         if native_model is None or self.mj_data is None:
             print("⚠️ [WireAssist] MuJoCoのnative modelが見つかりません。")
         else:
-            # G1の胴体として使われやすい名前を総当たりで検索
             for name in ["torso", "torso_link", "pelvis", "trunk"]:
                 bid = mj.mj_name2id(native_model, mj.mjtObj.mjOBJ_BODY, name)
                 if bid != -1:
                     self.body_id = bid
                     print(f"✅ [WireAssist] 接続成功！ 監視対象パーツ名: '{name}' (ID: {self.body_id})")
                     break
-            
+
             if self.body_id == -1:
                 print("⚠️ [WireAssist] 胴体が見つかりません！ワイヤーは作動しません。")
 
-    def step(self, action):
-        # === 1. AIへのコマンドを強制的に上書き (毎ステップ確実に0.5m/sで前進させる) ===
+    def _force_velocity_command(self):
         try:
-            cm = getattr(self.env.unwrapped, 'command_manager', None)
-            if cm is not None and 'velocity' in cm._terms:
-                cm._terms['velocity'].command[:, 0] = 0.5  # X方向(前進)
-                cm._terms['velocity'].command[:, 1] = 0.0  # Y方向(横歩きなし)
-                cm._terms['velocity'].command[:, 2] = 0.0  # 旋回なし
-        except Exception:
-            pass
+            cm = getattr(self.env.unwrapped, "command_manager", None)
+            if cm is None or not hasattr(cm, "_terms"):
+                return False
+            velocity_term = cm._terms.get("velocity") if hasattr(cm._terms, "get") else None
+            if velocity_term is None:
+                return False
+            cmd = getattr(velocity_term, "command", None)
+            if cmd is None:
+                return False
+            target = np.array([self.lin_vel_x, self.lin_vel_y, self.yaw_vel], dtype=np.float32)
+            if hasattr(cmd, "device"):
+                with torch.no_grad():
+                    cmd[:] = torch.tensor(target, device=cmd.device, dtype=cmd.dtype)
+            else:
+                cmd[...] = target
+            return True
+        except Exception as exc:
+            print(f"⚠️ [WireAssist] 速度コマンドの上書きに失敗: {exc}")
+            return False
 
-        # === 2. ワイヤーの力計算と適用 ===
+    def step(self, action):
+        self._force_velocity_command()
+
         if self.body_id != -1:
-            import torch
             quat_data = self.mj_data.xquat
-            quat_array = quat_data.detach().cpu().numpy() if hasattr(quat_data, 'cpu') else quat_data
+            quat_array = quat_data.detach().cpu().numpy() if hasattr(quat_data, "cpu") else quat_data
             quat = quat_array[0, self.body_id] if len(quat_array.shape) == 3 else quat_array[self.body_id]
 
             r = R.from_quat([quat[1], quat[2], quat[3], quat[0]])
-            pitch = r.as_euler('xyz', degrees=False)[1]
+            pitch = r.as_euler("xyz", degrees=False)[1]
 
             force_3d = np.zeros(3, dtype=np.float32)
-            
+
             if pitch > self.pitch_threshold:
                 force_3d = self.tension * self.dir_fwd
-                print(f"⚠️ [WireAssist] 前方へ傾き (Pitch: {pitch:.2f}) -> ワイヤー作動！")
             elif pitch < -self.pitch_threshold:
                 force_3d = self.tension * self.dir_bwd
-                print(f"⚠️ [WireAssist] 後方へ傾き (Pitch: {pitch:.2f}) -> ワイヤー作動！")
 
             force_6d = np.zeros(6, dtype=np.float32)
             force_6d[0:3] = force_3d
 
             xfrc = self.mj_data.xfrc_applied
-            if hasattr(xfrc, 'cpu'):
+            if hasattr(xfrc, "cpu"):
                 xfrc_target = xfrc[0, self.body_id] if len(xfrc.shape) == 3 else xfrc[self.body_id]
                 xfrc_target.copy_(torch.tensor(force_6d, device=xfrc.device))
             else:
@@ -100,10 +112,11 @@ class WireAssistWrapper:
                     xfrc[self.body_id] = force_6d
 
         return self.env.step(action)
-        
+
     def reset(self, **kwargs):
+        self._force_velocity_command()
         return self.env.reset(**kwargs)
-        
+
     def __getattr__(self, name):
         return getattr(self.env, name)
 
@@ -222,9 +235,9 @@ def run_play(task_id: str, cfg: PlayConfig):
     )
   env = ManagerBasedRlEnv(cfg=env_cfg, device=device, render_mode=render_mode)
 
-  # === 【追加】ここでワイヤーアシストのラッパーを被せます ===
-  #env = WireAssistWrapper(env, pitch_threshold=0.3)
-  # ==========================================================
+  # === 追加: 毎ステップで前進コマンドを強制的に上書きするラッパー ===
+  env = WireAssistWrapper(env, pitch_threshold=0.3, lin_vel_x=0.5, lin_vel_y=0.0, yaw_vel=0.0)
+  # =====================================================================
   
   if TRAINED_MODE and cfg.video:
     print("[INFO] Recording videos during play")
