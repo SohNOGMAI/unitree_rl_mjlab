@@ -26,13 +26,14 @@ from mjlab.viewer import NativeMujocoViewer, ViserPlayViewer
 
 class WireAssistWrapper:
     """ロボットの姿勢を監視しつつ、毎ステップで前進コマンドを強制的に上書きするラッパー。"""
-    def __init__(self, env, pitch_threshold=0.15, tension=85.0, lin_vel_x=0.5, lin_vel_y=0.0, yaw_vel=0.0):
+    def __init__(self, env, pitch_threshold=0.15, tension=100.0, lin_vel_x=-1.0, lin_vel_y=0.0, yaw_vel=0.0):
         self.env = env
         self.pitch_threshold = pitch_threshold
         self.tension = tension
         self.lin_vel_x = lin_vel_x
         self.lin_vel_y = lin_vel_y
         self.yaw_vel = yaw_vel
+        self.step_count = 0  # デバッグログ用カウンター
 
         vec_fwd = np.array([-0.2, 0.0, 1.0])
         self.dir_fwd = vec_fwd / np.linalg.norm(vec_fwd)
@@ -48,15 +49,40 @@ class WireAssistWrapper:
         if native_model is None or self.mj_data is None:
             print("⚠️ [WireAssist] MuJoCoのnative modelが見つかりません。")
         else:
-            for name in ["torso", "torso_link", "pelvis", "trunk"]:
+            # 最初に、既知の名前で検索（完全マッチと前方マッチ）
+            candidate_names = ["pelvis", "torso", "torso_link", "trunk", "base_link", "base", "waist", "robot/pelvis"]
+            for name in candidate_names:
                 bid = mj.mj_name2id(native_model, mj.mjtObj.mjOBJ_BODY, name)
                 if bid != -1:
                     self.body_id = bid
                     print(f"✅ [WireAssist] 接続成功！ 監視対象パーツ名: '{name}' (ID: {self.body_id})")
                     break
 
+            # 見つからなかった場合は、存在するボディをすべてリストアップして最適なものを選ぶ
             if self.body_id == -1:
-                print("⚠️ [WireAssist] 胴体が見つかりません！ワイヤーは作動しません。")
+                print("⚠️ [WireAssist] 既知の名前で見つかりませんでした。モデル内のボディを検索中...")
+                # 優先順位を設定: pelvisが最優先
+                priority_keywords = ["pelvis", "torso", "body", "waist", "abdomen", "spine"]
+                best_candidate = None
+                best_priority = -1
+                
+                for i in range(native_model.nbody):
+                    body_name = mj.mj_id2name(native_model, mj.mjtObj.mjOBJ_BODY, i)
+                    if body_name and len(body_name) > 0:
+                        print(f"  - Body {i}: {body_name}")
+                        # キーワードマッチングで優先度を決定
+                        for priority, kw in enumerate(priority_keywords):
+                            if kw in body_name.lower():
+                                if priority > best_priority:
+                                    best_priority = priority
+                                    best_candidate = (i, body_name)
+                                break
+
+                if best_candidate is not None:
+                    self.body_id = best_candidate[0]
+                    print(f"✅ [WireAssist] 接続成功！ 監視対象パーツ: '{best_candidate[1]}' (ID: {self.body_id})")
+                else:
+                    print("⚠️ [WireAssist] 適切な胴体が見つかりません。ワイヤーは作動しません。")
 
     def _force_velocity_command(self):
       try:
@@ -80,6 +106,7 @@ class WireAssistWrapper:
 
     def step(self, action):
         self._force_velocity_command()
+        self.step_count += 1
 
         if self.body_id != -1:
             quat_data = self.mj_data.xquat
@@ -93,23 +120,36 @@ class WireAssistWrapper:
 
             if pitch > self.pitch_threshold:
                 force_3d = self.tension * self.dir_fwd
-                print(f"⚠️ [WireAssist] 前方転倒の危機 (Pitch: {pitch:.2f}) -> ワイヤー作動！")
+                force_norm = np.linalg.norm(force_3d)
+                print(f"🔴 [WireAssist] 前方転倒の危機 (Pitch: {pitch:.4f}rad / {np.degrees(pitch):.2f}°) -> ワイヤー作動! Force: {force_norm:.2f}N, Direction: {force_3d}")
             elif pitch < -self.pitch_threshold:
                 force_3d = self.tension * self.dir_bwd
-                print(f"⚠️ [WireAssist] 後方転倒の危機 (Pitch: {pitch:.2f}) -> ワイヤー作動！")
+                force_norm = np.linalg.norm(force_3d)
+                print(f"🔴 [WireAssist] 後方転倒の危機 (Pitch: {pitch:.4f}rad / {np.degrees(pitch):.2f}°) -> ワイヤー作動! Force: {force_norm:.2f}N, Direction: {force_3d}")
+            
+            # 50フレームごとにピッチ角度をデバッグ出力
+            if self.step_count % 50 == 0:
+                print(f"[WireAssist Debug] Step {self.step_count}: Pitch = {pitch:.4f}rad ({np.degrees(pitch):.2f}°), Threshold = {self.pitch_threshold:.4f}rad ({np.degrees(self.pitch_threshold):.2f}°)")
 
             force_6d = np.zeros(6, dtype=np.float32)
             force_6d[0:3] = force_3d
 
             xfrc = self.mj_data.xfrc_applied
-            if hasattr(xfrc, "cpu"):
-                xfrc_target = xfrc[0, self.body_id] if len(xfrc.shape) == 3 else xfrc[self.body_id]
-                xfrc_target.copy_(torch.tensor(force_6d, device=xfrc.device))
-            else:
-                if len(xfrc.shape) == 3:
-                    xfrc[0, self.body_id] = force_6d
+            try:
+                if hasattr(xfrc, "cpu"):
+                    xfrc_target = xfrc[0, self.body_id] if len(xfrc.shape) == 3 else xfrc[self.body_id]
+                    xfrc_target.copy_(torch.tensor(force_6d, device=xfrc.device))
                 else:
-                    xfrc[self.body_id] = force_6d
+                    if len(xfrc.shape) == 3:
+                        xfrc[0, self.body_id] = force_6d
+                    else:
+                        xfrc[self.body_id] = force_6d
+                # 力が適用されたか確認
+                if np.linalg.norm(force_3d) > 0 and self.step_count % 100 == 0:
+                    applied_force = xfrc_target[0:3].detach().cpu().numpy() if hasattr(xfrc_target, 'detach') else xfrc_target[0:3]
+                    print(f"[WireAssist] 力が適用されました (Body ID: {self.body_id}): {applied_force}")
+            except Exception as e:
+                print(f"⚠️ [WireAssist] 力の適用に失敗: {e}")
 
         return self.env.step(action)
 
@@ -223,8 +263,7 @@ def run_play(task_id: str, cfg: PlayConfig):
   env = ManagerBasedRlEnv(cfg=env_cfg, device=device, render_mode=render_mode)
 
   # === 追加: 毎ステップで前進コマンドを強制的に上書きするラッパー ===
-  # (X方向の速度を0.5m/sに修正し、横歩きしないようにしました)
-  env = WireAssistWrapper(env, pitch_threshold=0.3, lin_vel_x=-0.5, lin_vel_y=0.0, yaw_vel=0.0)
+  env = WireAssistWrapper(env, pitch_threshold=0.15, tension=100.0, lin_vel_x=-2.5, lin_vel_y=0.0, yaw_vel=0.0)
   # =====================================================================
   
   if TRAINED_MODE and cfg.video:
