@@ -26,7 +26,7 @@ from mjlab.viewer import NativeMujocoViewer, ViserPlayViewer
 
 class WireAssistWrapper:
     """ロボットの姿勢を監視しつつ、毎ステップで前進コマンドを強制的に上書きするラッパー。"""
-    def __init__(self, env, pitch_threshold=0.15, tension=85.0, lin_vel_x=1.0, lin_vel_y=0.0, yaw_vel=0.0):
+    def __init__(self, env, pitch_threshold=0.15, tension=85.0, lin_vel_x=0.5, lin_vel_y=0.0, yaw_vel=0.0):
         self.env = env
         self.pitch_threshold = pitch_threshold
         self.tension = tension
@@ -59,24 +59,24 @@ class WireAssistWrapper:
                 print("⚠️ [WireAssist] 胴体が見つかりません！ワイヤーは作動しません。")
 
     def _force_velocity_command(self):
-        try:
-            cm = getattr(self.env.unwrapped, "command_manager", None)
-            if cm is None:
-                return False
-            command = cm.get_command("velocity")
-            if command is None:
-                return False
-            target = torch.tensor(
-                [self.lin_vel_x, self.lin_vel_y, self.yaw_vel],
-                device=command.device,
-                dtype=command.dtype,
-            )
-            with torch.no_grad():
-                command[:] = target
-            return True
-        except Exception as exc:
-            print(f"⚠️ [WireAssist] 速度コマンドの上書きに失敗: {exc}")
-            return False
+      try:
+        cm = getattr(self.env.unwrapped, "command_manager", None)
+        if cm is None:
+          return False
+        command = cm.get_command("twist")
+        if command is None:
+          return False
+        target = torch.tensor(
+          [self.lin_vel_x, self.lin_vel_y, self.yaw_vel],
+          device=command.device,
+          dtype=command.dtype,
+        )
+        with torch.no_grad():
+          command[:] = target
+        return True
+      except Exception as exc:
+        print(f"⚠️ [WireAssist] 速度コマンドの上書きに失敗: {exc}")
+        return False
 
     def step(self, action):
         self._force_velocity_command()
@@ -93,8 +93,10 @@ class WireAssistWrapper:
 
             if pitch > self.pitch_threshold:
                 force_3d = self.tension * self.dir_fwd
+                print(f"⚠️ [WireAssist] 前方転倒の危機 (Pitch: {pitch:.2f}) -> ワイヤー作動！")
             elif pitch < -self.pitch_threshold:
                 force_3d = self.tension * self.dir_bwd
+                print(f"⚠️ [WireAssist] 後方転倒の危機 (Pitch: {pitch:.2f}) -> ワイヤー作動！")
 
             force_6d = np.zeros(6, dtype=np.float32)
             force_6d[0:3] = force_3d
@@ -153,19 +155,6 @@ def run_play(task_id: str, cfg: PlayConfig):
   if cfg.no_terminations:
     env_cfg.terminations = {}
     print("[INFO]: Terminations disabled")
-
-  # =====================================================================
-  # 【追加】強制前進ハック: AIに与える目標速度の範囲を「常に前進」に固定する
-  # =====================================================================
-  try:
-      if "velocity" in env_cfg.commands:
-          env_cfg.commands["velocity"].ranges.lin_vel_x = (0.5, 0.5)  # X方向を0.5m/sに固定
-          env_cfg.commands["velocity"].ranges.lin_vel_y = (0.0, 0.0)  # 横歩き禁止
-          env_cfg.commands["velocity"].ranges.yaw_vel = (0.0, 0.0)    # 旋回禁止
-          print("✅ [Hack] 目標速度を前進(0.5m/s)に強制固定しました！")
-  except Exception as e:
-      print(f"⚠️ コマンド固定スキップ: {e}")
-  # =====================================================================
 
   # Check if this is a tracking task by checking for motion command.
   is_tracking_task = "motion" in env_cfg.commands and isinstance(
@@ -234,7 +223,8 @@ def run_play(task_id: str, cfg: PlayConfig):
   env = ManagerBasedRlEnv(cfg=env_cfg, device=device, render_mode=render_mode)
 
   # === 追加: 毎ステップで前進コマンドを強制的に上書きするラッパー ===
-  env = WireAssistWrapper(env, pitch_threshold=0.3, lin_vel_x=-1.0, lin_vel_y=0.0, yaw_vel=0.0)
+  # (X方向の速度を0.5m/sに修正し、横歩きしないようにしました)
+  env = WireAssistWrapper(env, pitch_threshold=0.3, lin_vel_x=-0.5, lin_vel_y=0.0, yaw_vel=0.0)
   # =====================================================================
   
   if TRAINED_MODE and cfg.video:
@@ -324,8 +314,3 @@ def main():
 
 if __name__ == "__main__":
   main()
-
-# 胴体のID確認用コード
-torso_id = mj.mj_name2id(env.sim.model, mj.mjtObj.mjOBJ_BODY, "torso")
-print(f"胴体のIDは: {torso_id}")
-print("hello")
