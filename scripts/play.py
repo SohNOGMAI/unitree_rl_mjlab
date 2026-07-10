@@ -61,20 +61,18 @@ class WireAssistWrapper:
     def _force_velocity_command(self):
         try:
             cm = getattr(self.env.unwrapped, "command_manager", None)
-            if cm is None or not hasattr(cm, "_terms"):
+            if cm is None:
                 return False
-            velocity_term = cm._terms.get("velocity") if hasattr(cm._terms, "get") else None
-            if velocity_term is None:
+            command = cm.get_command("velocity")
+            if command is None:
                 return False
-            cmd = getattr(velocity_term, "command", None)
-            if cmd is None:
-                return False
-            target = np.array([self.lin_vel_x, self.lin_vel_y, self.yaw_vel], dtype=np.float32)
-            if hasattr(cmd, "device"):
-                with torch.no_grad():
-                    cmd[:] = torch.tensor(target, device=cmd.device, dtype=cmd.dtype)
-            else:
-                cmd[...] = target
+            target = torch.tensor(
+                [self.lin_vel_x, self.lin_vel_y, self.yaw_vel],
+                device=command.device,
+                dtype=command.dtype,
+            )
+            with torch.no_grad():
+                command[:] = target
             return True
         except Exception as exc:
             print(f"⚠️ [WireAssist] 速度コマンドの上書きに失敗: {exc}")
@@ -236,7 +234,7 @@ def run_play(task_id: str, cfg: PlayConfig):
   env = ManagerBasedRlEnv(cfg=env_cfg, device=device, render_mode=render_mode)
 
   # === 追加: 毎ステップで前進コマンドを強制的に上書きするラッパー ===
-  env = WireAssistWrapper(env, pitch_threshold=0.3, lin_vel_x=0.5, lin_vel_y=0.0, yaw_vel=0.0)
+  env = WireAssistWrapper(env, pitch_threshold=0.3, lin_vel_x=-1.0, lin_vel_y=0.0, yaw_vel=0.0)
   # =====================================================================
   
   if TRAINED_MODE and cfg.video:
