@@ -30,23 +30,47 @@ class WireAssistWrapper:
   rear-back attachment point is explicitly added as ``r x F``.
   """
 
-  PHASE_APPROACH, PHASE_LIFT, PHASE_CROSS, PHASE_LOWER, PHASE_DONE = range(5)
+  (
+    PHASE_APPROACH,
+    PHASE_SETTLE,
+    PHASE_LIFT,
+    PHASE_CROSS,
+    PHASE_LOWER,
+    PHASE_DONE,
+  ) = range(6)
 
   def __init__(
     self,
     env,
-    anchor_pos=(2.0, 0.0, 2.5),
-    attachment_pos_b=(-0.12, 0.0, 0.18),
+    anchor_pos=(2.6, 0.0, 3.5),
+    attachment_pos_b=(-0.04, 0.0, 0.30),
     obstacle_body_names=("obstacle_box", "obstacle", "wall_front"),
-    lin_vel_x=0.5,
-    approach_distance=0.55,
+    lin_vel_x=1.0,
+    heading_kp=100.0,
+    max_yaw_rate=100.0,
+    turn_in_place_threshold=np.deg2rad(8.0),
+    approach_distance=0.90,
     clearance=0.10,
     lift_kp=420.0,
     lift_kd=90.0,
     pitch_kp=70.0,
-    lift_support_ratio=0.95,
-    max_tension=420.0,
-    tension_rate=900.0,
+    lift_support_ratio=1.25,
+    max_tension=650.0,
+    tension_rate=1200.0,
+    tension_release_rate=3000.0,
+    reel_in_speed=0.10,
+    payout_speed=0.25,
+    max_reel_in=1.00,
+    winch_kp=1500.0,
+    winch_kd=120.0,
+    pitch_soft_limit=np.deg2rad(8.0),
+    pitch_hard_limit=np.deg2rad(16.0),
+    pitch_payout_speed=0.45,
+    settle_time=2.0,
+    lift_min_hold_time=10.0,
+    lift_max_hold_time=20.0,
+    cross_hold_time=1.0,
+    release_time=3.0,
   ):
     self.env = env
     self.anchor_pos = np.asarray(anchor_pos, dtype=np.float64)
@@ -54,22 +78,43 @@ class WireAssistWrapper:
       self.anchor_pos = np.array([self.anchor_pos[0], 0.0, self.anchor_pos[1]])
     self.attachment_pos_b = np.asarray(attachment_pos_b, dtype=np.float64)
     self.lin_vel_x = lin_vel_x
+    self.heading_kp = heading_kp
+    self.max_yaw_rate = max_yaw_rate
+    self.turn_in_place_threshold = turn_in_place_threshold
     self.approach_distance = approach_distance
     self.clearance = clearance
     self.lift_kp, self.lift_kd = lift_kp, lift_kd
     self.pitch_kp = pitch_kp
     self.lift_support_ratio = lift_support_ratio
     self.max_tension, self.tension_rate = max_tension, tension_rate
+    self.tension_release_rate = tension_release_rate
+    self.reel_in_speed = reel_in_speed
+    self.payout_speed = payout_speed
+    self.max_reel_in = max_reel_in
+    self.winch_kp = winch_kp
+    self.winch_kd = winch_kd
+    self.pitch_soft_limit = pitch_soft_limit
+    self.pitch_hard_limit = pitch_hard_limit
+    self.pitch_payout_speed = pitch_payout_speed
+    self.settle_time = settle_time
+    self.lift_min_hold_time = lift_min_hold_time
+    self.lift_max_hold_time = lift_max_hold_time
+    self.cross_hold_time = cross_hold_time
+    self.release_time = release_time
     self.dt = float(getattr(env.unwrapped, "step_dt", 0.02))
 
     sim = getattr(env.unwrapped, "sim", None)
-    self.mj_model = getattr(env.unwrapped, "model", None)
-    self.mj_data = getattr(env.unwrapped, "data", None)
-    if self.mj_model is None and sim is not None:
-      self.mj_model = getattr(sim, "model", None)
-    if self.mj_data is None and sim is not None:
-      self.mj_data = getattr(sim, "data", None)
-    self.native_model = getattr(self.mj_model, "mj_model", self.mj_model)
+    # MJLab exposes two representations: sim.mj_model is the CPU-side native
+    # MjModel (names/topology), while sim.model/data are CUDA MuJoCo-Warp bridges.
+    # mj_id2name only accepts the former; forces must be written to the latter.
+    self.native_model = getattr(sim, "mj_model", None)
+    self.mj_data = getattr(sim, "data", None)
+    if self.native_model is None:
+      candidate = getattr(env.unwrapped, "mj_model", None)
+      if isinstance(candidate, mj.MjModel):
+        self.native_model = candidate
+    if self.mj_data is None:
+      self.mj_data = getattr(env.unwrapped, "data", None)
     if self.native_model is None or self.mj_data is None:
       raise RuntimeError("WireAssistWrapper could not access the MuJoCo model/data")
 
@@ -92,6 +137,12 @@ class WireAssistWrapper:
     self.nominal_attachment_z = None
     self.nominal_com_z = None
     self.previous_attachment_z = None
+    self.target_heading = None
+    self.heading_aligned = False
+    self.phase_start_step = 0
+    self.wire_length = None
+    self.commanded_wire_length = None
+    self.initial_wire_length = None
     self.step_counter = 0
 
   def _find_body(self, names):
@@ -124,20 +175,43 @@ class WireAssistWrapper:
     array = self._numpy(value)
     return np.array(array[0, item_id] if array.ndim == 3 else array[item_id], copy=True)
 
-  def _set_walking_command(self):
-    """Keep the learned locomotion policy on a constant +x body-frame command."""
+  @staticmethod
+  def _wrap_to_pi(angle):
+    return (angle + np.pi) % (2.0 * np.pi) - np.pi
+
+  def _set_walking_command(self, yaw=None, allow_forward=True):
+    """Turn once toward the initial anchor bearing, then command straight walking."""
     command_manager = getattr(self.env.unwrapped, "command_manager", None)
     if command_manager is None:
-      return
+      return False
+    aligned = False
     try:
       command = command_manager.get_command("twist")
+      linear_velocity = 0.0
+      yaw_rate = 0.0
+      if self.heading_aligned:
+        aligned = True
+        linear_velocity = self.lin_vel_x if allow_forward else 0.0
+      elif yaw is not None and self.target_heading is not None:
+        heading_error = self._wrap_to_pi(self.target_heading - yaw)
+        yaw_rate = float(
+          np.clip(self.heading_kp * heading_error, -self.max_yaw_rate, self.max_yaw_rate)
+        )
+        if abs(heading_error) <= self.turn_in_place_threshold:
+          self.heading_aligned = True
+          aligned = True
+          linear_velocity = self.lin_vel_x if allow_forward else 0.0
+          yaw_rate = 0.0
       target = torch.tensor(
-        [self.lin_vel_x, 0.0, 0.0], device=command.device, dtype=command.dtype
+        [linear_velocity, 0.0, yaw_rate],
+        device=command.device,
+        dtype=command.dtype,
       )
       with torch.no_grad():
         command[:] = target
     except (KeyError, AttributeError):
-      return
+      return False
+    return aligned
 
   def _obstacle_bounds(self):
     geom_xpos = getattr(self.mj_data, "geom_xpos", None)
@@ -165,11 +239,24 @@ class WireAssistWrapper:
     robot_com = self._env0(self.mj_data.subtree_com, self.robot_root_id)
     body_com = self._env0(self.mj_data.xipos, self.body_id)
     pitch = rotation.as_euler("xyz", degrees=False)[1]
+    root_quat_wxyz = self._env0(self.mj_data.xquat, self.robot_root_id)
+    root_rotation = R.from_quat(
+      [root_quat_wxyz[1], root_quat_wxyz[2], root_quat_wxyz[3], root_quat_wxyz[0]]
+    )
+    yaw = root_rotation.as_euler("xyz", degrees=False)[2]
     vz = 0.0
     if self.previous_attachment_z is not None:
       vz = (attachment_pos[2] - self.previous_attachment_z) / self.dt
     self.previous_attachment_z = attachment_pos[2]
-    return robot_com, body_com, attachment_pos, rotation, pitch, vz
+    return robot_com, body_com, attachment_pos, rotation, pitch, yaw, vz
+
+  def _set_phase(self, phase):
+    if phase != self.phase:
+      self.phase = phase
+      self.phase_start_step = self.step_counter
+
+  def _phase_time(self):
+    return (self.step_counter - self.phase_start_step) * self.dt
 
   def _desired_tension(self, robot_com, body_com, attachment_pos, pitch, vz):
     box_front, box_back, box_bottom, box_top = self._obstacle_bounds()
@@ -181,43 +268,87 @@ class WireAssistWrapper:
     target_z = self.nominal_attachment_z + (box_top - box_bottom) + self.clearance
 
     if self.phase == self.PHASE_APPROACH and x >= box_front - self.approach_distance:
-      self.phase = self.PHASE_LIFT
-    if self.phase == self.PHASE_LIFT and attachment_pos[2] >= target_z:
-      self.phase = self.PHASE_CROSS
-    if self.phase == self.PHASE_CROSS and x >= box_back + 0.10:
-      self.phase = self.PHASE_LOWER
-    if self.phase == self.PHASE_LOWER and x >= box_back + 0.55:
-      self.phase = self.PHASE_DONE
-
-    if self.phase in (self.PHASE_APPROACH, self.PHASE_DONE):
-      return 0.0
-
+      self._set_phase(self.PHASE_SETTLE)
+    if self.phase == self.PHASE_SETTLE and self._phase_time() >= self.settle_time:
+      self._set_phase(self.PHASE_LIFT)
     if self.phase == self.PHASE_LIFT:
-      vertical_request = self.lift_support_ratio * self.robot_weight
-      vertical_request += self.lift_kp * max(0.0, target_z - attachment_pos[2])
-      vertical_request -= self.lift_kd * vz
-    elif self.phase == self.PHASE_CROSS:
-      cross_z = target_z - 0.5 * self.clearance
-      vertical_request = 0.75 * self.lift_support_ratio * self.robot_weight
-      vertical_request += 0.35 * self.lift_kp * max(0.0, cross_z - attachment_pos[2])
-      vertical_request -= 0.5 * self.lift_kd * vz
-    else:  # LOWER: retain a little support and then smoothly release it.
-      release = np.clip((box_back + 0.55 - x) / 0.45, 0.0, 1.0)
-      vertical_request = release * 0.12 * self.max_tension
+      lifted_over_box = attachment_pos[2] >= target_z and x >= box_front
+      if (lifted_over_box and self._phase_time() >= self.lift_min_hold_time) or (
+        self._phase_time() >= self.lift_max_hold_time
+      ):
+        self._set_phase(self.PHASE_CROSS)
+    if self.phase == self.PHASE_CROSS and self._phase_time() >= self.cross_hold_time:
+      self._set_phase(self.PHASE_LOWER)
+    if self.phase == self.PHASE_LOWER and self._phase_time() >= self.release_time:
+      self._set_phase(self.PHASE_DONE)
 
-    vertical_request += self.lift_kp * max(0.0, self.nominal_com_z - robot_com[2])
     cable = self.anchor_pos - attachment_pos
-    length = np.linalg.norm(cable)
-    if length < 1e-6 or cable[2] <= 1e-3:
+    actual_length = float(np.linalg.norm(cable))
+    if actual_length < 1e-6:
       return 0.0
-    unit_cable = cable / length
-    unit_moment_y = np.cross(attachment_pos - body_com, unit_cable)[1]
-    if pitch * unit_moment_y < 0.0:
-      vertical_request += self.pitch_kp * abs(pitch)
-    return float(np.clip(vertical_request / (cable[2] / length), 0.0, self.max_tension))
+
+    if self.wire_length is None:
+      self.wire_length = actual_length
+      self.commanded_wire_length = actual_length
+      self.initial_wire_length = actual_length
+
+    previous_actual_length = self.wire_length
+    previous_commanded_length = self.commanded_wire_length
+    self.wire_length = actual_length
+
+    if self.phase == self.PHASE_APPROACH:
+      # Before the obstacle the winch pays out freely, so the cable stays slack.
+      self.commanded_wire_length = actual_length
+      self.initial_wire_length = actual_length
+    elif self.phase in (self.PHASE_LIFT, self.PHASE_CROSS):
+      minimum_length = self.initial_wire_length - self.max_reel_in
+      self.commanded_wire_length = max(
+        minimum_length,
+        self.commanded_wire_length - self.reel_in_speed * self.dt,
+      )
+    elif self.phase == self.PHASE_LOWER:
+      self.commanded_wire_length = min(
+        self.initial_wire_length,
+        self.commanded_wire_length + self.payout_speed * self.dt,
+      )
+    elif self.phase == self.PHASE_DONE:
+      self.commanded_wire_length = actual_length
+
+    # The rear attachment creates a forward pitching moment.  If the torso
+    # starts pitching forward, stop reel-in and pay cable out instead.
+    if pitch > self.pitch_soft_limit and self.phase in (
+      self.PHASE_LIFT,
+      self.PHASE_CROSS,
+    ):
+      self.commanded_wire_length = min(
+        self.initial_wire_length,
+        max(self.commanded_wire_length, previous_commanded_length)
+        + self.pitch_payout_speed * self.dt,
+      )
+
+    actual_length_rate = (actual_length - previous_actual_length) / self.dt
+    commanded_length_rate = (
+      self.commanded_wire_length - previous_commanded_length
+    ) / self.dt
+    extension = max(0.0, actual_length - self.commanded_wire_length)
+    extension_rate = actual_length_rate - commanded_length_rate
+    target_tension = self.winch_kp * extension + self.winch_kd * extension_rate
+    pitch_scale = np.clip(
+      (self.pitch_hard_limit - pitch)
+      / (self.pitch_hard_limit - self.pitch_soft_limit),
+      0.0,
+      1.0,
+    )
+    target_tension *= pitch_scale
+
+    # The cable cannot push; SETTLE intentionally leaves it slack before reel-in.
+    if self.phase in (self.PHASE_APPROACH, self.PHASE_SETTLE, self.PHASE_DONE):
+      return 0.0
+    return float(np.clip(target_tension, 0.0, self.max_tension))
 
   def _apply_cable_force(self, body_com, attachment_pos, desired_tension):
-    max_delta = self.tension_rate * self.dt
+    rate = self.tension_rate if desired_tension >= self.tension else self.tension_release_rate
+    max_delta = rate * self.dt
     self.tension += np.clip(desired_tension - self.tension, -max_delta, max_delta)
     cable = self.anchor_pos - attachment_pos
     cable_length = np.linalg.norm(cable)
@@ -232,23 +363,65 @@ class WireAssistWrapper:
     else:
       target[:] = wrench
 
-  def step(self, action):
-    self.step_counter += 1
-    self._set_walking_command()
-    robot_com, body_com, attachment_pos, _, pitch, vz = self._robot_state()
-    desired = self._desired_tension(robot_com, body_com, attachment_pos, pitch, vz)
-    self._apply_cable_force(body_com, attachment_pos, desired)
-    return self.env.step(action)
-
-  def reset(self, **kwargs):
-    result = self.env.reset(**kwargs)
+  def _reset_controller_state(self):
+    """Reset only wrapper state after MJLab has reset the simulation itself."""
     self.phase = self.PHASE_APPROACH
     self.tension = 0.0
     self.nominal_attachment_z = None
     self.nominal_com_z = None
     self.previous_attachment_z = None
+    self.heading_aligned = False
+    self.phase_start_step = 0
     self.step_counter = 0
-    self._set_walking_command()
+    self.target_heading = None
+    self.wire_length = None
+    self.commanded_wire_length = None
+    self.initial_wire_length = None
+
+    # At this point MJLab has already called sim.forward(), so all poses describe
+    # the new episode and can safely initialize the rule-based controller.
+    robot_com, _, _, _, _, yaw, _ = self._robot_state()
+    direction = self.anchor_pos - robot_com
+    self.target_heading = float(np.arctan2(direction[1], direction[0]))
+    self._set_walking_command(yaw, allow_forward=True)
+
+  @staticmethod
+  def _has_finished_episode(value):
+    if value is None:
+      return False
+    if hasattr(value, "any"):
+      result = value.any()
+      return bool(result.item() if hasattr(result, "item") else result)
+    return bool(np.any(value))
+
+  def step(self, action):
+    self.step_counter += 1
+    robot_com, body_com, attachment_pos, _, pitch, yaw, vz = self._robot_state()
+    if self.target_heading is None:
+      direction = self.anchor_pos - robot_com
+      self.target_heading = float(np.arctan2(direction[1], direction[0]))
+    heading_aligned = self._set_walking_command(yaw, allow_forward=False)
+    desired = (
+      self._desired_tension(robot_com, body_com, attachment_pos, pitch, vz)
+      if heading_aligned
+      else 0.0
+    )
+    self._apply_cable_force(body_com, attachment_pos, desired)
+    allow_forward = self.phase in (self.PHASE_APPROACH, self.PHASE_DONE)
+    self._set_walking_command(yaw, allow_forward=allow_forward)
+    result = self.env.step(action)
+
+    # ManagerBasedRlEnv performs automatic episode resets inside step().  That
+    # bypasses this wrapper's reset(), so mirror the reset for controller state.
+    terminated = result[2] if isinstance(result, tuple) and len(result) >= 4 else None
+    time_out = result[3] if isinstance(result, tuple) and len(result) >= 4 else None
+    if self._has_finished_episode(terminated) or self._has_finished_episode(time_out):
+      self._reset_controller_state()
+    return result
+
+  def reset(self, **kwargs):
+    result = self.env.reset(**kwargs)
+    self._reset_controller_state()
     return result
 
   def __getattr__(self, name):
@@ -311,13 +484,33 @@ def run_play(task_id: str, cfg: PlayConfig):
   if cfg.video_height is not None: env_cfg.viewer.height = cfg.video_height
   if cfg.video_width is not None: env_cfg.viewer.width = cfg.video_width
 
+  # Rule-based playback must be deterministic.  The training environment normally
+  # randomizes x/y/yaw at every reset and resamples velocity commands every 3--8 s.
+  reset_base = env_cfg.events.get("reset_base")
+  if reset_base is not None:
+    pose_range = reset_base.params.setdefault("pose_range", {})
+    pose_range.update({"x": (0.0, 0.0), "y": (0.0, 0.0), "yaw": (0.0, 0.0)})
+    reset_base.params["velocity_range"] = {}
+  twist_cfg = env_cfg.commands.get("twist")
+  if twist_cfg is not None and hasattr(twist_cfg, "ranges"):
+    twist_cfg.resampling_time_range = (1.0e6, 1.0e6)
+    twist_cfg.heading_command = False
+    twist_cfg.ranges.lin_vel_x = (0.0, 0.0)
+    twist_cfg.ranges.lin_vel_y = (0.0, 0.0)
+    twist_cfg.ranges.ang_vel_z = (0.0, 0.0)
+    twist_cfg.ranges.heading = None
+
+  # Added obstacle geoms can exceed MJWarp's automatically selected broadphase
+  # capacity.  The observed minimum was 54, so reserve a comfortable margin.
+  env_cfg.sim.nconmax = max(env_cfg.sim.nconmax or 0, 128)
+
   render_mode = "rgb_array" if (TRAINED_MODE and cfg.video) else None
   env = ManagerBasedRlEnv(cfg=env_cfg, device=device, render_mode=render_mode)
 
   # =========================================================================
   # 歩行ポリシーは +x へ進み、固定アンカーへの張力だけを独立制御します。
   # =========================================================================
-  env = WireAssistWrapper(env, anchor_pos=(2.0, 0.0, 2.5), lin_vel_x=0.5)
+  env = WireAssistWrapper(env, anchor_pos=(2.6, 0.0, 3.5), lin_vel_x=0.5)
   
   if TRAINED_MODE and cfg.video:
     env = VideoRecorder(env, video_folder=log_dir / "videos" / "play", step_trigger=lambda step: step == 0, video_length=cfg.video_length, disable_logger=True)
