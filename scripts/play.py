@@ -26,7 +26,7 @@ from mjlab.viewer import NativeMujocoViewer, ViserPlayViewer
 
 class WireAssistWrapper:
     """ロボットの姿勢を監視しつつ、毎ステップで前進コマンドを強制的に上書きするラッパー。"""
-    def __init__(self, env, pitch_threshold=0.15, tension=100.0, lin_vel_x=-1.0, lin_vel_y=0.0, yaw_vel=0.0):
+    def __init__(self, env, pitch_threshold=0.30, tension=300.0, lin_vel_x=0.5, lin_vel_y=0.0, yaw_vel=0.0):
         self.env = env
         self.pitch_threshold = pitch_threshold
         self.tension = tension
@@ -35,10 +35,10 @@ class WireAssistWrapper:
         self.yaw_vel = yaw_vel
         self.step_count = 0  # デバッグログ用カウンター
 
-        vec_fwd = np.array([-0.2, 0.0, 1.0])
+        vec_fwd = np.array([0.5, 0.0, 1.0])
         self.dir_fwd = vec_fwd / np.linalg.norm(vec_fwd)
 
-        vec_bwd = np.array([0.5, 0.0, 1.0])
+        vec_bwd = np.array([-0.5, 0.0, 1.0])
         self.dir_bwd = vec_bwd / np.linalg.norm(vec_bwd)
 
         self.mj_model = getattr(env.unwrapped, "model", None) or getattr(getattr(env.unwrapped, "sim", None), "model", None)
@@ -264,7 +264,7 @@ def run_play(task_id: str, cfg: PlayConfig):
   env = ManagerBasedRlEnv(cfg=env_cfg, device=device, render_mode=render_mode)
 
   # === 追加: 毎ステップで前進コマンドを強制的に上書きするラッパー ===
-  env = WireAssistWrapper(env, pitch_threshold=0.15, tension=100.0, lin_vel_x=0.5, lin_vel_y=0.0, yaw_vel=0.0)
+  env = WireAssistWrapper(env, pitch_threshold=0.20, tension=300.0, lin_vel_x=0.5, lin_vel_y=0.0, yaw_vel=0.0)
   # =====================================================================
   
   if TRAINED_MODE and cfg.video:
