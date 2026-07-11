@@ -212,6 +212,7 @@
         </body>
       </body>
     </body>
+    <geom name="obstacle_box" type="box" size="0.2 1.0 0.1" pos="0.8 0 0.1" rgba="0.2 0.6 0.8 1"/>
   </worldbody>
   <contact>
     <exclude body1="left_elbow_link" body2="left_wrist_roll_rubber_hand"/>
