@@ -260,7 +260,7 @@
       <geom type="box" size="2.0 1.0 0.2" rgba="0.8 0.4 0.2 1" group="0" contype="0" conaffinity="0"/>
       <geom type="box" size="2.0 1.0 0.2" rgba="0.8 0.4 0.2 0" group="3" contype="15" conaffinity="15" condim="3" friction="1.5 0.005 0.0001"/>
     </body>
-    <body name="anchor_visual" pos="2.2 0 2.4">
+    <body name="anchor_visual" pos="2.5 0 2.4">
             <geom type="sphere" size="0.15" rgba="0.2 0.9 0.2 0.8" group="0" contype="0" conaffinity="0" />
     </body>
   </worldbody>
