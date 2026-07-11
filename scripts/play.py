@@ -57,8 +57,8 @@ class WireAssistWrapper:
     attachment_pos_b=(-0.04, 0.0, 0.30),
     obstacle_body_names=("obstacle_box", "obstacle", "wall_front"),
     lin_vel_x=1.0,
-    heading_kp=0.5,
-    max_yaw_rate=0.15,
+    heading_kp=2.0,
+    max_yaw_rate=0.8,
     turn_in_place_threshold=np.deg2rad(8.0),
     approach_distance=0.40,
     clearance=0.10,
@@ -83,13 +83,9 @@ class WireAssistWrapper:
     hold_rate_tolerance=0.06,
     lower_release_delay=0.75,
     lower_max_time=5.0,
-    yaw_stabilization_kp=0.0,
-    yaw_stabilization_kd=0.0,
-    max_yaw_stabilization_torque=0.0,
-    swing_offset_soft_limit=0.06,
-    swing_velocity_soft_limit=0.12,
-    swing_min_winch_scale=0.10,
-    lateral_velocity_filter_alpha=0.12,
+    yaw_stabilization_kp=18.0,
+    yaw_stabilization_kd=6.0,
+    max_yaw_stabilization_torque=15.0,
     vertical_alignment_tolerance=0.08,
     wire_length_tolerance=0.02,
     lift_target_velocity=0.12,
@@ -104,7 +100,7 @@ class WireAssistWrapper:
     lift_detect_tension=300.0,
     posture_blend_time=1.0,
     posture_action_limit=3.5,
-    policy_action_filter_alpha=0.025,
+    policy_action_filter_alpha=0.08,
     settle_time=2.0,
     lift_min_hold_time=6.0,
     lift_max_hold_time=12.0,
@@ -147,10 +143,6 @@ class WireAssistWrapper:
     self.yaw_stabilization_kp = yaw_stabilization_kp
     self.yaw_stabilization_kd = yaw_stabilization_kd
     self.max_yaw_stabilization_torque = max_yaw_stabilization_torque
-    self.swing_offset_soft_limit = swing_offset_soft_limit
-    self.swing_velocity_soft_limit = swing_velocity_soft_limit
-    self.swing_min_winch_scale = swing_min_winch_scale
-    self.lateral_velocity_filter_alpha = lateral_velocity_filter_alpha
     self.vertical_alignment_tolerance = vertical_alignment_tolerance
     self.wire_length_tolerance = wire_length_tolerance
     self.lift_target_velocity = lift_target_velocity
@@ -228,10 +220,6 @@ class WireAssistWrapper:
     self.previous_yaw = None
     self.filtered_yaw_rate = 0.0
     self.heading_error = 0.0
-    self.previous_attachment_y = None
-    self.lateral_offset = 0.0
-    self.filtered_lateral_velocity = 0.0
-    self.swing_winch_scale = 1.0
     self.lower_command_complete_step = None
     self.filtered_policy_action = None
     self.step_counter = 0
@@ -381,24 +369,6 @@ class WireAssistWrapper:
       yaw_rate = self._wrap_to_pi(yaw - self.previous_yaw) / self.dt
       self.filtered_yaw_rate += 0.2 * (yaw_rate - self.filtered_yaw_rate)
     self.previous_yaw = yaw
-    self.lateral_offset = float(attachment_pos[1] - self.anchor_pos[1])
-    if self.previous_attachment_y is not None:
-      lateral_velocity = (
-        attachment_pos[1] - self.previous_attachment_y
-      ) / self.dt
-      self.filtered_lateral_velocity += self.lateral_velocity_filter_alpha * (
-        lateral_velocity - self.filtered_lateral_velocity
-      )
-    self.previous_attachment_y = float(attachment_pos[1])
-    swing_severity = max(
-      abs(self.lateral_offset) / max(self.swing_offset_soft_limit, 1e-6),
-      abs(self.filtered_lateral_velocity)
-      / max(self.swing_velocity_soft_limit, 1e-6),
-      1.0,
-    )
-    self.swing_winch_scale = float(
-      np.clip(1.0 / swing_severity, self.swing_min_winch_scale, 1.0)
-    )
     vz = 0.0
     if self.previous_attachment_z is not None:
       vz = (attachment_pos[2] - self.previous_attachment_z) / self.dt
@@ -605,7 +575,7 @@ class WireAssistWrapper:
       reel_speed = min(
         self.reel_in_speed,
         np.sqrt(2.0 * self.wire_acceleration * remaining),
-      ) * self.swing_winch_scale
+      )
       self.commanded_wire_length = max(
         self.target_wire_length,
         self.commanded_wire_length - reel_speed * self.dt,
@@ -621,7 +591,7 @@ class WireAssistWrapper:
       payout_speed = min(
         self.payout_speed,
         np.sqrt(2.0 * self.wire_acceleration * remaining),
-      ) * self.swing_winch_scale
+      )
       self.commanded_wire_length = min(
         self.initial_wire_length,
         self.commanded_wire_length + payout_speed * self.dt,
@@ -695,9 +665,6 @@ class WireAssistWrapper:
       f"T={self.tension:6.1f}/{self.desired_tension:6.1f}N "
       f"yaw_err={np.rad2deg(self.heading_error):+.1f}deg "
       f"yaw_rate={np.rad2deg(self.filtered_yaw_rate):+.1f}deg/s "
-      f"y={self.lateral_offset:+.3f}m "
-      f"vy={self.filtered_lateral_velocity:+.3f}m/s "
-      f"winch_scale={self.swing_winch_scale:.2f} "
       f"z_back={attachment_pos[2]:.3f}m "
       f"vz={vz:+.3f}m/s",
       flush=True,
@@ -728,10 +695,6 @@ class WireAssistWrapper:
     self.previous_yaw = None
     self.filtered_yaw_rate = 0.0
     self.heading_error = 0.0
-    self.previous_attachment_y = None
-    self.lateral_offset = 0.0
-    self.filtered_lateral_velocity = 0.0
-    self.swing_winch_scale = 1.0
     self.lower_command_complete_step = None
     self.filtered_policy_action = None
     self.last_log_step = -1
