@@ -9,11 +9,9 @@ from typing import Literal
 import torch
 import tyro
 
-# === 【追加】ワイヤーアシスト用のライブラリ ===
 import mujoco as mj
 import numpy as np
 from scipy.spatial.transform import Rotation as R
-# ============================================
 
 from mjlab.envs import ManagerBasedRlEnv
 from mjlab.rl import MjlabOnPolicyRunner, RslRlVecEnvWrapper
@@ -25,39 +23,47 @@ from mjlab.utils.wrappers import VideoRecorder
 from mjlab.viewer import NativeMujocoViewer, ViserPlayViewer
 
 class WireAssistWrapper:
-    """姿勢の傾きに応じて張力と方向を動的に計算する（比例制御）ワイヤーアシストラッパー"""
-    def __init__(self, env, base_tow_x=30.0, base_tow_z=10.0, kp_x=-150.0, kp_z=400.0, max_z_force=250.0, lin_vel_x=0.5, lin_vel_y=0.0, yaw_vel=0.0):
+    """
+    【固定アンカー・非対称張力制御版】
+    ロボットの歩行を阻害せず、倒れる方向の物理的制約（前方にアンカーがある時は前に引くと危ない等）を考慮した高度なワイヤーアシスト。
+    """
+    def __init__(self, env, anchor_pos=[3.0, 2.5], 
+                 base_tension=10.0, kp_pitch=40.0, kz_com=150.0,
+                 pitch_threshold=0.08, max_tension=80.0,
+                 lin_vel_x=0.5, lin_vel_y=0.0, yaw_vel=0.0):
         self.env = env
         
-        # 基本の牽引力（平地で軽く前・上に引っ張る力）
-        self.base_tow_x = base_tow_x
-        self.base_tow_z = base_tow_z
+        # ワイヤーの端点（ワールド座標の完全固定点: X, Y, Z）
+        self.anchor_pos = np.array([anchor_pos[0], 0.0, anchor_pos[1]])
         
-        # 比例ゲイン（傾き1radあたりの力の変化量）
-        self.kp_x = kp_x  # 負の値: 前傾したら前への牽引を弱める（後ろに引く）
-        self.kp_z = kp_z  # 正の値: 傾いたら上への吊り上げを強める
+        # 張力パラメータ（全体的に非常にマイルドに設定）
+        self.base_tension = base_tension
+        self.kp_pitch = kp_pitch # 姿勢回復ゲイン
+        self.kz_com = kz_com     # 沈み込み回復ゲイン
+        self.pitch_threshold = pitch_threshold
+        self.max_tension = max_tension # 絶対にロボットを吹っ飛ばさない上限張力 (約8kg分)
         
-        # ぶっ飛び防止の上限リミッター（単位: ニュートン。250Nなら約25kg分までしか持ち上げない）
-        self.max_z_force = max_z_force
-
         self.lin_vel_x = lin_vel_x
         self.lin_vel_y = lin_vel_y
         self.yaw_vel = yaw_vel
+        
+        self.z_ref = None
+        self.prev_pitch = 0.0
         self.step_counter = 0
-
+        
         self.mj_model = getattr(env.unwrapped, "model", None) or getattr(getattr(env.unwrapped, "sim", None), "model", None)
         self.mj_data = getattr(env.unwrapped, "data", None) or getattr(getattr(env.unwrapped, "sim", None), "data", None)
         native_model = getattr(self.mj_model, "mj_model", None) or getattr(getattr(env.unwrapped, "sim", None), "mj_model", None)
-
+        
+        self.dt = getattr(env.unwrapped, "step_dt", 0.02)
         self.body_id = -1
+
         if native_model is None or self.mj_data is None:
             print("⚠️ [WireAssist] MuJoCoのnative modelが見つかりません。")
         else:
-            available_bodies = []
             for i in range(native_model.nbody):
                 name = mj.mj_id2name(native_model, mj.mjtObj.mjOBJ_BODY, i)
                 if name:
-                    available_bodies.append(name)
                     name_lower = name.lower()
                     if "torso" in name_lower or "pelvis" in name_lower or "trunk" in name_lower:
                         self.body_id = i
@@ -65,91 +71,113 @@ class WireAssistWrapper:
                         break
 
     def _force_velocity_command(self):
-      try:
-        cm = getattr(self.env.unwrapped, "command_manager", None)
-        if cm is None: return False
-        command = cm.get_command("twist")
-        if command is None: return False
-        target = torch.tensor([self.lin_vel_x, self.lin_vel_y, self.yaw_vel], device=command.device, dtype=command.dtype)
-        with torch.no_grad():
-          command[:] = target
-        return True
-      except Exception:
-        return False
+        try:
+            cm = getattr(self.env.unwrapped, "command_manager", None)
+            if cm is None: return False
+            command = cm.get_command("twist")
+            if command is None: return False
+            target = torch.tensor([self.lin_vel_x, self.lin_vel_y, self.yaw_vel], device=command.device, dtype=command.dtype)
+            with torch.no_grad():
+                command[:] = target
+            return True
+        except Exception:
+            return False
+
+    def _get_robot_state(self):
+        if self.body_id == -1: return None
+        import torch
+        
+        quat_data = self.mj_data.xquat
+        quat_array = quat_data.detach().cpu().numpy() if hasattr(quat_data, "cpu") else quat_data
+        quat = quat_array[0, self.body_id] if len(quat_array.shape) == 3 else quat_array[self.body_id]
+
+        r = R.from_quat([quat[1], quat[2], quat[3], quat[0]])
+        pitch = r.as_euler("xyz", degrees=False)[1]
+        
+        pos_data = self.mj_data.xpos
+        pos_array = pos_data.detach().cpu().numpy() if hasattr(pos_data, "cpu") else pos_data
+        torso_pos = pos_array[0, self.body_id] if len(pos_array.shape) == 3 else pos_array[self.body_id]
+        
+        try:
+            com_data = self.mj_data.subtree_com
+            com_array = com_data.detach().cpu().numpy() if hasattr(com_data, "cpu") else com_data
+            com_pos = com_array[0, 1] if len(com_array.shape) == 3 else com_array[1]
+        except:
+            com_pos = torso_pos
+
+        return torso_pos, pitch, com_pos
 
     def step(self, action):
         self._force_velocity_command()
         self.step_counter += 1
-
-        if self.body_id != -1:
-            import torch
-            quat_data = self.mj_data.xquat
-            quat_array = quat_data.detach().cpu().numpy() if hasattr(quat_data, "cpu") else quat_data
-            quat = quat_array[0, self.body_id] if len(quat_array.shape) == 3 else quat_array[self.body_id]
-
-            r = R.from_quat([quat[1], quat[2], quat[3], quat[0]])
-            euler_angles = r.as_euler("xyz", degrees=False)
-            pitch = euler_angles[1]  # ラジアン単位のピッチ角
-            yaw = euler_angles[2]
-
-            # ========================================================
-            # 【革新部分】動的インピーダンス（比例）制御による張力計算
-            # ========================================================
-            if pitch > 0:  
-                # 前傾時: 倒れるのを防ぐため、前への力を弱め、上への力を急激に強める
-                corr_x = self.kp_x * pitch
-                corr_z = self.kp_z * pitch
-            else:          
-                # 後傾時: 後ろに倒れないよう、前への牽引を強め、上への力も強める
-                corr_x = -self.kp_x * pitch  # pitchが負なので、結果としてXはプラスになる
-                corr_z = -self.kp_z * pitch
-
-            # 最終的なローカル座標系での力
-            local_fx = self.base_tow_x + corr_x
-            local_fz = self.base_tow_z + corr_z
-
-            # 【ぶっ飛び防止】上方向(Z)の力がリミッターを超えないように制限
-            local_fz = np.clip(local_fz, 0.0, self.max_z_force)
-            # X方向も、極端に後ろに引きすぎないよう下限を設定
-            local_fx = np.clip(local_fx, -50.0, 150.0)
-
-            local_force = np.array([local_fx, 0.0, local_fz])
-
-            # ヨー角を使ってワールド座標系に回転
-            rot_matrix = np.array([
-                [np.cos(yaw), -np.sin(yaw), 0.0],
-                [np.sin(yaw),  np.cos(yaw), 0.0],
-                [0.0,         0.0,        1.0]
-            ])
-            force_3d = np.dot(rot_matrix, local_force)
-
-            # ターミナルログ (間引いて出力)
-            if self.step_counter % 30 == 0:
-                pitch_deg = np.degrees(pitch)
-                if abs(pitch) > 0.15: # 約8.5度以上傾いたら警告色
-                    print(f"💥 [DynamicAssist] 大傾斜! Pitch: {pitch_deg:.1f}度 | 補正張力: X={local_fx:.1f}N, Z={local_fz:.1f}N")
-                elif self.step_counter % 150 == 0:
-                    print(f"🚜 [DynamicAssist] 平地安定牽引 Pitch: {pitch_deg:.1f}度 | 張力: X={local_fx:.1f}N, Z={local_fz:.1f}N")
-
-            # 力を適用
+        
+        state = self._get_robot_state()
+        if state is not None:
+            torso_pos, pitch, com_pos = state
+            
+            if self.z_ref is None:
+                self.z_ref = com_pos[2]
+                
+            # ワイヤーベクトルの計算
+            direction = self.anchor_pos - torso_pos
+            current_length = np.linalg.norm(direction)
+            u_vec = direction / current_length if current_length > 1e-3 else np.array([0.0, 0.0, 1.0])
+            
+            # --- 高度な非対称・張力制御アルゴリズム ---
+            f_target = self.base_tension
+            
+            # アンカーがロボットの前方にあるか後方にあるか
+            is_anchor_forward = direction[0] > 0
+            
+            if is_anchor_forward:
+                # 【アンカーが前方にある時】
+                if pitch < -self.pitch_threshold:
+                    # 後ろに倒れそうな時だけ、前に引き起こす
+                    f_target += self.kp_pitch * (-pitch - self.pitch_threshold)
+                elif pitch > self.pitch_threshold:
+                    # 前に倒れそうな時に引っ張ると余計転ぶため、あえて張力を抜く（スラック制御）
+                    f_target = max(0.0, f_target - 10.0 * (pitch - self.pitch_threshold))
+            else:
+                # 【アンカーが後方にある時】(ロボットが通り過ぎた後)
+                if pitch > self.pitch_threshold:
+                    # 前に倒れそうな時に、後ろに引き起こす
+                    f_target += self.kp_pitch * (pitch - self.pitch_threshold)
+                elif pitch < -self.pitch_threshold:
+                    # 後ろに倒れそうな時は張力を抜く
+                    f_target = max(0.0, f_target - 10.0 * (-pitch - self.pitch_threshold))
+                    
+            # 重心落下補償（しゃがみ込み、段差登攀時のサポート）
+            delta_z = self.z_ref - com_pos[2]
+            if delta_z > 0.05:  
+                # 高度2.5mのアンカーを活かし、Z方向への引き上げ力を強化
+                f_target += self.kz_com * delta_z
+                
+            # 歩行を邪魔しないための絶対安全リミッター
+            tension = np.clip(f_target, 0.0, self.max_tension)
+                
+            # 外力の印加
+            force_vec = tension * u_vec
             force_6d = np.zeros(6, dtype=np.float32)
-            force_6d[0:3] = force_3d
-
+            force_6d[0:3] = force_vec
+            
+            import torch
             xfrc = self.mj_data.xfrc_applied
             if hasattr(xfrc, "cpu"):
                 xfrc_target = xfrc[0, self.body_id] if len(xfrc.shape) == 3 else xfrc[self.body_id]
                 xfrc_target.copy_(torch.tensor(force_6d, device=xfrc.device))
             else:
-                if len(xfrc.shape) == 3:
-                    xfrc[0, self.body_id] = force_6d
-                else:
-                    xfrc[self.body_id] = force_6d
+                if len(xfrc.shape) == 3: xfrc[0, self.body_id] = force_6d
+                else: xfrc[self.body_id] = force_6d
+
+            if self.step_counter % 50 == 0:
+                print(f"🔗 [WireAssist] 張力: {tension:.1f}N | 力ベクトル: [{force_vec[0]:.1f}, {force_vec[1]:.1f}, {force_vec[2]:.1f}] | Pitch: {np.degrees(pitch):.1f}度")
 
         return self.env.step(action)
 
     def reset(self, **kwargs):
         self._force_velocity_command()
-        self.step_counter = 0
+        self.z_ref = None
+        self.prev_pitch = 0.0
         return self.env.reset(**kwargs)
 
     def __getattr__(self, name):
@@ -169,184 +197,96 @@ class PlayConfig:
   camera: int | str | None = None
   viewer: Literal["auto", "native", "viser"] = "auto"
   no_terminations: bool = False
-  """Disable all termination conditions (useful for viewing motions with dummy agents)."""
 
-
-  # Internal flag used by demo script.
   _demo_mode: tyro.conf.Suppress[bool] = False
-
 
 def run_play(task_id: str, cfg: PlayConfig):
   configure_torch_backends()
-
   device = cfg.device or ("cuda:0" if torch.cuda.is_available() else "cpu")
-
   env_cfg = load_env_cfg(task_id, play=True)
   agent_cfg = load_rl_cfg(task_id)
-
   DUMMY_MODE = cfg.agent in {"zero", "random"}
   TRAINED_MODE = not DUMMY_MODE
 
-  # Disable terminations if requested (useful for viewing motions).
   if cfg.no_terminations:
     env_cfg.terminations = {}
     print("[INFO]: Terminations disabled")
 
-  # Check if this is a tracking task by checking for motion command.
-  is_tracking_task = "motion" in env_cfg.commands and isinstance(
-    env_cfg.commands["motion"], MotionCommandCfg
-  )
-
+  is_tracking_task = "motion" in env_cfg.commands and isinstance(env_cfg.commands["motion"], MotionCommandCfg)
   if is_tracking_task and cfg._demo_mode:
-    # Demo mode: use uniform sampling to see more diversity with num_envs > 1.
     motion_cmd = env_cfg.commands["motion"]
     assert isinstance(motion_cmd, MotionCommandCfg)
     motion_cmd.sampling_mode = "uniform"
-
   if is_tracking_task:
     motion_cmd = env_cfg.commands["motion"]
     assert isinstance(motion_cmd, MotionCommandCfg)
-
-    # Check for local motion file first (works for both dummy and trained modes).
     if cfg.motion_file is not None and Path(cfg.motion_file).exists():
-      print(f"[INFO]: Using local motion file: {cfg.motion_file}")
       motion_cmd.motion_file = cfg.motion_file
     elif DUMMY_MODE:
       if not cfg.registry_name:
-        raise ValueError(
-          "Tracking tasks require either:\n"
-          "  --motion-file /path/to/motion.npz (local file)\n"
-          "  --registry-name your-org/motions/motion-name (download from WandB)"
-        )
+        raise ValueError("Tracking tasks require motion file")
+
   log_dir: Path | None = None
   resume_path: Path | None = None
   if TRAINED_MODE:
     log_root_path = (Path("logs") / "rsl_rl" / agent_cfg.experiment_name).resolve()
     if cfg.checkpoint_file is not None:
       resume_path = Path(cfg.checkpoint_file)
-      if not resume_path.exists():
-        raise FileNotFoundError(f"Checkpoint file not found: {resume_path}")
-      print(f"[INFO]: Loading checkpoint: {resume_path.name}")
     else:
-      if cfg.wandb_run_path is None:
-        raise ValueError(
-          "`wandb_run_path` is required when `checkpoint_file` is not provided."
-        )
-      resume_path, was_cached = get_wandb_checkpoint_path(
-        log_root_path, Path(cfg.wandb_run_path)
-      )
-      # Extract run_id and checkpoint name from path for display.
-      run_id = resume_path.parent.name
-      checkpoint_name = resume_path.name
-      cached_str = "cached" if was_cached else "downloaded"
-      print(
-        f"[INFO]: Loading checkpoint: {checkpoint_name} (run: {run_id}, {cached_str})"
-      )
+      resume_path, _ = get_wandb_checkpoint_path(log_root_path, Path(cfg.wandb_run_path))
     log_dir = resume_path.parent
 
-  if cfg.num_envs is not None:
-    env_cfg.scene.num_envs = cfg.num_envs
-  if cfg.video_height is not None:
-    env_cfg.viewer.height = cfg.video_height
-  if cfg.video_width is not None:
-    env_cfg.viewer.width = cfg.video_width
+  if cfg.num_envs is not None: env_cfg.scene.num_envs = cfg.num_envs
+  if cfg.video_height is not None: env_cfg.viewer.height = cfg.video_height
+  if cfg.video_width is not None: env_cfg.viewer.width = cfg.video_width
 
   render_mode = "rgb_array" if (TRAINED_MODE and cfg.video) else None
-  if cfg.video and DUMMY_MODE:
-    print(
-      "[WARN] Video recording with dummy agents is disabled (no checkpoint/log_dir)."
-    )
   env = ManagerBasedRlEnv(cfg=env_cfg, device=device, render_mode=render_mode)
 
-  # === 追加: 毎ステップで前進コマンドを強制的に上書きするラッパー ===
-  # base_tension や hoist_tension の指定を消し、デフォルト値（動的アルゴリズム）に任せます
-  env = WireAssistWrapper(env, lin_vel_x=0.5, lin_vel_y=0.0, yaw_vel=0.0)
-  # =====================================================================
+  # =========================================================================
+  # 固定アンカー設定 (X=3.0mの前方、高さZ=2.5mからアシスト)
+  # 張力の上限を80Nに抑え、歩行を阻害しない設計に変更
+  # =========================================================================
+  env = WireAssistWrapper(env, anchor_pos=[3.0, 2.5], base_tension=10.0, max_tension=80.0, lin_vel_x=0.5)
   
   if TRAINED_MODE and cfg.video:
-    print("[INFO] Recording videos during play")
-    assert log_dir is not None  # log_dir is set in TRAINED_MODE block
-    env = VideoRecorder(
-      env,
-      video_folder=log_dir / "videos" / "play",
-      step_trigger=lambda step: step == 0,
-      video_length=cfg.video_length,
-      disable_logger=True,
-    )
+    env = VideoRecorder(env, video_folder=log_dir / "videos" / "play", step_trigger=lambda step: step == 0, video_length=cfg.video_length, disable_logger=True)
 
   env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
   if DUMMY_MODE:
     action_shape: tuple[int, ...] = env.unwrapped.action_space.shape
     if cfg.agent == "zero":
-
       class PolicyZero:
-        def __call__(self, obs) -> torch.Tensor:
-          del obs
-          return torch.zeros(action_shape, device=env.unwrapped.device)
-
+        def __call__(self, obs) -> torch.Tensor: return torch.zeros(action_shape, device=env.unwrapped.device)
       policy = PolicyZero()
     else:
-
       class PolicyRandom:
-        def __call__(self, obs) -> torch.Tensor:
-          del obs
-          return 2 * torch.rand(action_shape, device=env.unwrapped.device) - 1
-
+        def __call__(self, obs) -> torch.Tensor: return 2 * torch.rand(action_shape, device=env.unwrapped.device) - 1
       policy = PolicyRandom()
   else:
     runner_cls = load_runner_cls(task_id) or MjlabOnPolicyRunner
     runner = runner_cls(env, asdict(agent_cfg), device=device)
-    runner.load(
-      str(resume_path), load_cfg={"actor": True}, strict=True, map_location=device
-    )
+    runner.load(str(resume_path), load_cfg={"actor": True}, strict=True, map_location=device)
     policy = runner.get_inference_policy(device=device)
 
-  # Handle "auto" viewer selection.
   if cfg.viewer == "auto":
     has_display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
     resolved_viewer = "native" if has_display else "viser"
-    del has_display
   else:
     resolved_viewer = cfg.viewer
 
-  if resolved_viewer == "native":
-    NativeMujocoViewer(env, policy).run()
-  elif resolved_viewer == "viser":
-    ViserPlayViewer(env, policy).run()
-  else:
-    raise RuntimeError(f"Unsupported viewer backend: {resolved_viewer}")
-
+  if resolved_viewer == "native": NativeMujocoViewer(env, policy).run()
+  elif resolved_viewer == "viser": ViserPlayViewer(env, policy).run()
+  else: raise RuntimeError(f"Unsupported viewer backend: {resolved_viewer}")
   env.close()
 
-
 def main():
-  # Parse first argument to choose the task.
-  # Import tasks to populate the registry.
   import mjlab.tasks  # noqa: F401
   import src.tasks
-
   all_tasks = list_tasks()
-  chosen_task, remaining_args = tyro.cli(
-    tyro.extras.literal_type_from_choices(all_tasks),
-    add_help=False,
-    return_unknown_args=True,
-    config=mjlab.TYRO_FLAGS,
-  )
-
-  # Parse the rest of the arguments + allow overriding env_cfg and agent_cfg.
-  agent_cfg = load_rl_cfg(chosen_task)
-
-  args = tyro.cli(
-    PlayConfig,
-    args=remaining_args,
-    default=PlayConfig(),
-    prog=sys.argv[0] + f" {chosen_task}",
-    config=mjlab.TYRO_FLAGS,
-  )
-  del remaining_args, agent_cfg
-
+  chosen_task, remaining_args = tyro.cli(tyro.extras.literal_type_from_choices(all_tasks), add_help=False, return_unknown_args=True, config=mjlab.TYRO_FLAGS)
+  args = tyro.cli(PlayConfig, args=remaining_args, default=PlayConfig(), prog=sys.argv[0] + f" {chosen_task}", config=mjlab.TYRO_FLAGS)
   run_play(chosen_task, args)
-
 
 if __name__ == "__main__":
   main()

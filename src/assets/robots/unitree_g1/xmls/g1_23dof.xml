@@ -212,28 +212,31 @@
         </body>
       </body>
     </body>
-    <body name="wall_front" pos="1.0 0 0.15">
-            <geom type="box" size="0.1 1.1 0.15" rgba="0.8 0.4 0.2 1" group="0" contype="0" conaffinity="0" />
-            <geom type="box" size="0.1 1.1 0.15" rgba="0.8 0.4 0.2 0" group="2" contype="15" conaffinity="15" condim="3" friction="1.5 0.005 0.0001" />
-            <geom type="box" size="0.1 1.1 0.15" rgba="0.8 0.4 0.2 0" group="3" contype="15" conaffinity="15" condim="3" friction="1.5 0.005 0.0001" />
+    <body name="wall_front" pos="2.0 0 0.075">
+            <geom type="box" size="0.1 2.1 0.075" rgba="0.8 0.4 0.2 1" group="0" contype="0" conaffinity="0" />
+            <geom type="box" size="0.1 2.1 0.075" rgba="0.8 0.4 0.2 0" group="2" contype="15" conaffinity="15" condim="3" friction="1.5 0.005 0.0001" />
+            <geom type="box" size="0.1 2.1 0.075" rgba="0.8 0.4 0.2 0" group="3" contype="15" conaffinity="15" condim="3" friction="1.5 0.005 0.0001" />
         </body>
 
-        <body name="wall_back" pos="-1.0 0 0.15">
-            <geom type="box" size="0.1 1.1 0.15" rgba="0.8 0.4 0.2 1" group="0" contype="0" conaffinity="0" />
-            <geom type="box" size="0.1 1.1 0.15" rgba="0.8 0.4 0.2 0" group="2" contype="15" conaffinity="15" condim="3" friction="1.5 0.005 0.0001" />
-            <geom type="box" size="0.1 1.1 0.15" rgba="0.8 0.4 0.2 0" group="3" contype="15" conaffinity="15" condim="3" friction="1.5 0.005 0.0001" />
+        <!-- 2. 後壁 (Back Wall) : ロボットの後方2.0mに配置 -->
+        <body name="wall_back" pos="-2.0 0 0.075">
+            <geom type="box" size="0.1 2.1 0.075" rgba="0.8 0.4 0.2 1" group="0" contype="0" conaffinity="0" />
+            <geom type="box" size="0.1 2.1 0.075" rgba="0.8 0.4 0.2 0" group="2" contype="15" conaffinity="15" condim="3" friction="1.5 0.005 0.0001" />
+            <geom type="box" size="0.1 2.1 0.075" rgba="0.8 0.4 0.2 0" group="3" contype="15" conaffinity="15" condim="3" friction="1.5 0.005 0.0001" />
         </body>
 
-        <body name="wall_left" pos="0 1.0 0.15">
-            <geom type="box" size="1.1 0.1 0.15" rgba="0.8 0.4 0.2 1" group="0" contype="0" conaffinity="0" />
-            <geom type="box" size="1.1 0.1 0.15" rgba="0.8 0.4 0.2 0" group="2" contype="15" conaffinity="15" condim="3" friction="1.5 0.005 0.0001" />
-            <geom type="box" size="1.1 0.1 0.15" rgba="0.8 0.4 0.2 0" group="3" contype="15" conaffinity="15" condim="3" friction="1.5 0.005 0.0001" />
+        <!-- 3. 左壁 (Left Wall) : ロボットの左側2.0mに配置 -->
+        <body name="wall_left" pos="0 2.0 0.075">
+            <geom type="box" size="2.1 0.1 0.075" rgba="0.8 0.4 0.2 1" group="0" contype="0" conaffinity="0" />
+            <geom type="box" size="2.1 0.1 0.075" rgba="0.8 0.4 0.2 0" group="2" contype="15" conaffinity="15" condim="3" friction="1.5 0.005 0.0001" />
+            <geom type="box" size="2.1 0.1 0.075" rgba="0.8 0.4 0.2 0" group="3" contype="15" conaffinity="15" condim="3" friction="1.5 0.005 0.0001" />
         </body>
 
-        <body name="wall_right" pos="0 -1.0 0.15">
-            <geom type="box" size="1.1 0.1 0.15" rgba="0.8 0.4 0.2 1" group="0" contype="0" conaffinity="0" />
-            <geom type="box" size="1.1 0.1 0.15" rgba="0.8 0.4 0.2 0" group="2" contype="15" conaffinity="15" condim="3" friction="1.5 0.005 0.0001" />
-            <geom type="box" size="1.1 0.1 0.15" rgba="0.8 0.4 0.2 0" group="3" contype="15" conaffinity="15" condim="3" friction="1.5 0.005 0.0001" />
+        <!-- 4. 右壁 (Right Wall) : ロボットの右側2.0mに配置 -->
+        <body name="wall_right" pos="0 -2.0 0.075">
+            <geom type="box" size="2.1 0.1 0.075" rgba="0.8 0.4 0.2 1" group="0" contype="0" conaffinity="0" />
+            <geom type="box" size="2.1 0.1 0.075" rgba="0.8 0.4 0.2 0" group="2" contype="15" conaffinity="15" condim="3" friction="1.5 0.005 0.0001" />
+            <geom type="box" size="2.1 0.1 0.075" rgba="0.8 0.4 0.2 0" group="3" contype="15" conaffinity="15" condim="3" friction="1.5 0.005 0.0001" />
     </body>
   </worldbody>
   <contact>
