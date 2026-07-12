@@ -55,7 +55,7 @@ class WireAssistWrapper:
   def __init__(
     self,
     env,
-    anchor_pos=(2.5, 0.0, 2.4),
+    anchor_pos=(2.3, 0.0, 2.4),
     attachment_pos_b=(-0.14, 0.0, 0.40),
     obstacle_body_names=("obstacle_box", "obstacle", "wall_front"),
     lin_vel_x=1.0,
@@ -72,10 +72,10 @@ class WireAssistWrapper:
     tension_rate=1200.0,
     tension_release_rate=200.0,
     reel_in_speed=0.10,
-    payout_speed=0.08,
+    payout_speed=0.10,
     max_reel_in=1.00,
-    hoist_target_wire_length=0.60,
-    release_target_wire_length=1.00,
+    hoist_target_wire_length=0.55,
+    release_target_wire_length=0.85,
     winch_kp=1500.0,
     winch_kd=120.0,
     constraint_kp=500.0,
@@ -89,9 +89,6 @@ class WireAssistWrapper:
     yaw_stabilization_kp=0.0,
     yaw_stabilization_kd=0.0,
     max_yaw_stabilization_torque=0.0,
-    waist_roll_kp=300.0,
-    waist_roll_kd=15.0,
-    max_waist_roll_torque=100.0,
     vertical_alignment_tolerance=0.08,
     wire_length_tolerance=0.02,
     lift_target_velocity=0.12,
@@ -104,19 +101,26 @@ class WireAssistWrapper:
     lift_detect_velocity=0.03,
     lift_detect_height=0.02,
     lift_detect_tension=300.0,
-    posture_blend_time=1.0,
+    wide_posture_delay=1.0,
+    wide_posture_lift_height=0.10,
+    brace_start_time=0.5,
+    brace_blend_time=2.0,
+    wide_posture_blend_time=4.0,
+    wide_posture_action_rate_limit=0.6,
+    down_posture_blend_time=2.0,
+    posture_blend_time=2.0,
     landing_posture_blend_time=1.0,
     post_release_settle_time=1.5,
     policy_resume_blend_time=1.5,
     assisted_policy_hold_time=3.0,
     walk_resume_ramp_time=2.0,
-    posture_action_limit=3.5,
+    posture_action_limit=2.0,
     policy_action_filter_alpha=0.08,
-    pre_lift_stand_time=1.5,
+    pre_lift_stand_time=1.0,
     settle_time=3.0,
     lift_min_hold_time=6.0,
     lift_max_hold_time=12.0,
-    cross_hold_time=2.0,
+    cross_hold_time=0.5,
     release_time=3.0,
     release_min_time=0.5,
     release_tension_threshold=200.0,
@@ -156,9 +160,6 @@ class WireAssistWrapper:
     self.yaw_stabilization_kp = yaw_stabilization_kp
     self.yaw_stabilization_kd = yaw_stabilization_kd
     self.max_yaw_stabilization_torque = max_yaw_stabilization_torque
-    self.waist_roll_kp = waist_roll_kp
-    self.waist_roll_kd = waist_roll_kd
-    self.max_waist_roll_torque = max_waist_roll_torque
     self.vertical_alignment_tolerance = vertical_alignment_tolerance
     self.wire_length_tolerance = wire_length_tolerance
     self.lift_target_velocity = lift_target_velocity
@@ -171,6 +172,13 @@ class WireAssistWrapper:
     self.lift_detect_velocity = lift_detect_velocity
     self.lift_detect_height = lift_detect_height
     self.lift_detect_tension = lift_detect_tension
+    self.wide_posture_delay = wide_posture_delay
+    self.wide_posture_lift_height = wide_posture_lift_height
+    self.brace_start_time = brace_start_time
+    self.brace_blend_time = brace_blend_time
+    self.wide_posture_blend_time = wide_posture_blend_time
+    self.wide_posture_action_rate_limit = wide_posture_action_rate_limit
+    self.down_posture_blend_time = down_posture_blend_time
     self.posture_blend_time = posture_blend_time
     self.landing_posture_blend_time = landing_posture_blend_time
     self.post_release_settle_time = post_release_settle_time
@@ -209,6 +217,12 @@ class WireAssistWrapper:
     self.obstacle_body_id = self._find_body(obstacle_body_names)
     if self.body_id < 0:
       raise ValueError("WireAssistWrapper: torso_link/pelvis body was not found")
+    print(
+      "[WIRE] force body: "
+      f"{mj.mj_id2name(self.native_model, mj.mjtObj.mjOBJ_BODY, self.body_id)} "
+      f"(id={self.body_id})",
+      flush=True,
+    )
     self.robot_root_id = int(self.native_model.body_rootid[self.body_id])
     if self.obstacle_body_id < 0:
       raise ValueError(
@@ -218,21 +232,20 @@ class WireAssistWrapper:
     if self.obstacle_geom_id < 0:
       raise ValueError("WireAssistWrapper: obstacle body has no box geom")
     self.robot_weight = float(self.native_model.body_subtreemass[self.robot_root_id]) * 9.81
-    self.waist_roll_joint_id = mj.mj_name2id(
-      self.native_model,
-      mj.mjtObj.mjOBJ_JOINT,
-      "waist_roll_joint",
-    )
-    if self.waist_roll_joint_id >= 0:
-      self.waist_roll_qpos_adr = int(
-        self.native_model.jnt_qposadr[self.waist_roll_joint_id]
+    self.robot_entity = self.env.unwrapped.scene["robot"]
+    self.waist_entity_joint_ids = {}
+    resolved_waist_names = {}
+    for axis in ("yaw", "roll", "pitch"):
+      ids, names = self.robot_entity.find_joints(f"waist_{axis}_joint")
+      self.waist_entity_joint_ids[axis] = ids[0] if ids else -1
+      resolved_waist_names[axis] = names[0] if names else None
+    print(f"[WIRE] resolved Entity waist joints: {resolved_waist_names}", flush=True)
+    if self.waist_entity_joint_ids["roll"] < 0:
+      print(
+        "[WIRE][WARN] waist_roll_joint is absent; observed lateral bending "
+        "comes from the root/hips rather than a waist-roll joint.",
+        flush=True,
       )
-      self.waist_roll_dof_adr = int(
-        self.native_model.jnt_dofadr[self.waist_roll_joint_id]
-      )
-    else:
-      self.waist_roll_qpos_adr = -1
-      self.waist_roll_dof_adr = -1
 
     self.phase = self.PHASE_APPROACH
     self.tension = 0.0
@@ -252,6 +265,42 @@ class WireAssistWrapper:
     self.posture_lock_start_action = None
     self.lift_posture_action = self._build_lift_posture_action()
     self.landing_posture_action = self._build_landing_posture_action()
+    self.brace_posture_action = self._build_brace_posture_action()
+    self.down_posture_action = self._build_down_posture_action()
+    self.waist_action_indices = []
+    self.brace_action_indices = []
+    action_manager = getattr(self.env.unwrapped, "action_manager", None)
+    if action_manager is not None:
+      try:
+        joint_term = action_manager.get_term("joint_pos")
+        self.waist_action_indices = [
+          index
+          for index, name in enumerate(joint_term.target_names)
+          if any(
+            name == f"waist_{axis}_joint"
+            or name.endswith(f"waist_{axis}_joint")
+            for axis in ("yaw", "roll", "pitch")
+          )
+        ]
+        self.brace_action_indices = [
+          index
+          for index, name in enumerate(joint_term.target_names)
+          if any(
+            name.endswith(suffix)
+            for suffix in (
+              "shoulder_pitch_joint",
+              "shoulder_roll_joint",
+              "elbow_joint",
+            )
+          )
+        ]
+      except (KeyError, AttributeError):
+        pass
+    print(
+      f"[WIRE] waist action indices locked during lift-assist: "
+      f"{self.waist_action_indices}",
+      flush=True,
+    )
     self.filtered_lift_velocity = 0.0
     self.filtered_wire_rate = 0.0
     self.commanded_wire_rate = 0.0
@@ -267,21 +316,37 @@ class WireAssistWrapper:
     self.torso_roll = 0.0
     self.waist_roll_angle = 0.0
     self.waist_roll_torque = 0.0
+    self.waist_angles = {axis: 0.0 for axis in ("yaw", "roll", "pitch")}
+    self.waist_torques = {axis: 0.0 for axis in ("yaw", "roll", "pitch")}
+    self.torso_relative_rpy = np.zeros(3, dtype=np.float64)
+    self.waist_lock_active = False
+    self.lift_start_attachment_z = None
+    self.wide_posture_ready = False
+    self.brace_start_action = None
     self.step_counter = 0
     self.last_log_step = -1
 
   def _find_body(self, names):
-    exact = {name.lower() for name in names}
-    fallback = -1
-    for body_id in range(self.native_model.nbody):
-      name = mj.mj_id2name(self.native_model, mj.mjtObj.mjOBJ_BODY, body_id)
-      if not name:
-        continue
-      if name.lower() in exact:
-        return body_id
-      if fallback < 0 and any(candidate in name.lower() for candidate in exact):
-        fallback = body_id
-    return fallback
+    # Respect caller priority.  Scanning model order first selected pelvis
+    # before torso_link because pelvis appears earlier in the body tree.
+    model_names = [
+      mj.mj_id2name(self.native_model, mj.mjtObj.mjOBJ_BODY, body_id)
+      for body_id in range(self.native_model.nbody)
+    ]
+    for requested_name in names:
+      requested = requested_name.lower()
+      for body_id, model_name in enumerate(model_names):
+        if model_name and (
+          model_name.lower() == requested
+          or model_name.lower().endswith(requested)
+        ):
+          return body_id
+    for requested_name in names:
+      requested = requested_name.lower()
+      for body_id, model_name in enumerate(model_names):
+        if model_name and requested in model_name.lower():
+          return body_id
+    return -1
 
   def _find_site(self, requested_name):
     for site_id in range(self.native_model.nsite):
@@ -290,16 +355,23 @@ class WireAssistWrapper:
         return site_id
     return -1
 
+  def _find_joint(self, requested_name):
+    for joint_id in range(self.native_model.njnt):
+      name = mj.mj_id2name(self.native_model, mj.mjtObj.mjOBJ_JOINT, joint_id)
+      if name and (name == requested_name or name.endswith(requested_name)):
+        return joint_id
+    return -1
+
   def _build_lift_posture_action(self):
     """Wide posture: high yaw inertia and a broad front contact envelope."""
     return self._build_posture_action(
       {
         "left_hip_pitch_joint": 0.0,
         "right_hip_pitch_joint": 0.0,
-        "left_hip_roll_joint": 0.30,
-        "right_hip_roll_joint": -0.30,
-        "left_knee_joint": 0.15,
-        "right_knee_joint": 0.15,
+        "left_hip_roll_joint": 0.35,
+        "right_hip_roll_joint": -0.35,
+        "left_knee_joint": 0.35,
+        "right_knee_joint": 0.35,
         "left_ankle_pitch_joint": -0.15,
         "right_ankle_pitch_joint": -0.15,
         "left_ankle_roll_joint": -0.26,
@@ -342,6 +414,45 @@ class WireAssistWrapper:
       }
     )
 
+  def _build_brace_posture_action(self):
+    """Arms diagonally forward to brace lightly against the platform edge."""
+    return self._build_posture_action(
+      {
+        "left_shoulder_pitch_joint": -0.50,
+        "right_shoulder_pitch_joint": -0.50,
+        "left_shoulder_roll_joint": 0.70,
+        "right_shoulder_roll_joint": -0.70,
+        "left_elbow_joint": 0.25,
+        "right_elbow_joint": 0.25,
+      }
+    )
+
+  def _build_down_posture_action(self):
+    """Keep the wide stance but move both soles forward of the COM."""
+    return self._build_posture_action(
+      {
+        "left_hip_pitch_joint": -0.50,
+        "right_hip_pitch_joint": -0.50,
+        "left_hip_roll_joint": 0.30,
+        "right_hip_roll_joint": -0.30,
+        "left_knee_joint": 0.70,
+        "right_knee_joint": 0.70,
+        "left_ankle_pitch_joint": -0.40,
+        "right_ankle_pitch_joint": -0.40,
+        "left_ankle_roll_joint": -0.26,
+        "right_ankle_roll_joint": 0.26,
+        "waist_yaw_joint": 0.0,
+        "waist_roll_joint": 0.0,
+        "waist_pitch_joint": 0.25,
+        "left_shoulder_pitch_joint": 0.50,
+        "right_shoulder_pitch_joint": 0.50,
+        "left_shoulder_roll_joint": 1.50,
+        "right_shoulder_roll_joint": -1.50,
+        "left_elbow_joint": 0.35,
+        "right_elbow_joint": 0.35,
+      }
+    )
+
   def _build_posture_action(self, desired):
     action_manager = getattr(self.env.unwrapped, "action_manager", None)
     if action_manager is None:
@@ -354,11 +465,19 @@ class WireAssistWrapper:
 
     posture = torch.zeros_like(term.raw_action)
     for index, name in enumerate(names):
-      if name not in desired:
+      requested_name = next(
+        (
+          candidate
+          for candidate in desired
+          if name == candidate or name.endswith(candidate)
+        ),
+        None,
+      )
+      if requested_name is None:
         continue
       joint_offset = offset[:, index] if hasattr(offset, "ndim") else offset
       joint_scale = scale[:, index] if hasattr(scale, "ndim") else scale
-      posture[:, index] = (desired[name] - joint_offset) / joint_scale
+      posture[:, index] = (desired[requested_name] - joint_offset) / joint_scale
     return torch.clamp(
       posture, -self.posture_action_limit, self.posture_action_limit
     )
@@ -446,6 +565,9 @@ class WireAssistWrapper:
     root_rotation = R.from_quat(
       [root_quat_wxyz[1], root_quat_wxyz[2], root_quat_wxyz[3], root_quat_wxyz[0]]
     )
+    self.torso_relative_rpy = (
+      root_rotation.inv() * rotation
+    ).as_euler("xyz", degrees=False)
     yaw = root_rotation.as_euler("xyz", degrees=False)[2]
     if self.previous_yaw is not None:
       yaw_rate = self._wrap_to_pi(yaw - self.previous_yaw) / self.dt
@@ -603,42 +725,20 @@ class WireAssistWrapper:
     else:
       target[:] = wrench
 
-  def _apply_waist_roll_control(self, enabled):
-    """Apply joint-space PD torque only to waist_roll_joint."""
-    self.waist_roll_torque = 0.0
-    if self.waist_roll_joint_id < 0:
-      return
-    qpos = getattr(self.mj_data, "qpos", None)
-    qvel = getattr(self.mj_data, "qvel", None)
-    qfrc = getattr(self.mj_data, "qfrc_applied", None)
-    if qpos is None or qvel is None or qfrc is None:
-      return
+  def _update_waist_diagnostics(self):
+    """Read waist state through Entity indexing; never write qfrc_applied."""
+    joint_pos = self.robot_entity.data.joint_pos
+    for axis in ("yaw", "roll", "pitch"):
+      joint_id = self.waist_entity_joint_ids.get(axis, -1)
+      if joint_id < 0:
+        self.waist_angles[axis] = 0.0
+        self.waist_torques[axis] = 0.0
+        continue
+      self.waist_angles[axis] = float(joint_pos[0, joint_id].item())
+      self.waist_torques[axis] = 0.0
 
-    angle = self._scalar_env0(qpos, self.waist_roll_qpos_adr)
-    velocity = self._scalar_env0(qvel, self.waist_roll_dof_adr)
-    torque = 0.0
-    if enabled:
-      torque = float(
-        np.clip(
-          -self.waist_roll_kp * angle - self.waist_roll_kd * velocity,
-          -self.max_waist_roll_torque,
-          self.max_waist_roll_torque,
-        )
-      )
-    self.waist_roll_angle = angle
-    self.waist_roll_torque = torque
-    index = (
-      (0, self.waist_roll_dof_adr)
-      if len(qfrc.shape) == 2
-      else self.waist_roll_dof_adr
-    )
-    target = qfrc[index]
-    if hasattr(target, "copy_"):
-      target.copy_(
-        torch.as_tensor(torque, device=target.device, dtype=target.dtype)
-      )
-    else:
-      qfrc[index] = torque
+    self.waist_roll_angle = self.waist_angles["roll"]
+    self.waist_roll_torque = 0.0
 
   def _inextensible_cable_tension(self, attachment_pos):
     """Reel an inextensible cable at constant speed to a fixed hoist length."""
@@ -673,6 +773,14 @@ class WireAssistWrapper:
           )
         )
         self._set_phase(self.PHASE_SETTLE)
+
+    if self.phase == self.PHASE_SETTLE:
+      # Keep the cable slack while the standing policy settles.  Following the
+      # measured length prevents a stored length error at LIFT entry.
+      self.commanded_wire_length = actual_length
+      self.initial_wire_length = actual_length
+      if self.configured_release_target_wire_length is None:
+        self.release_target_wire_length = actual_length
 
     if self.phase == self.PHASE_SETTLE and self._phase_time() >= self.settle_time:
       self._set_phase(self.PHASE_LIFT)
@@ -790,8 +898,18 @@ class WireAssistWrapper:
       f"yaw_err={np.rad2deg(self.heading_error):+.1f}deg "
       f"yaw_rate={np.rad2deg(self.filtered_yaw_rate):+.1f}deg/s "
       f"roll={np.rad2deg(self.torso_roll):+.1f}deg "
-      f"waist_roll={np.rad2deg(self.waist_roll_angle):+.1f}deg "
-      f"waist_T={self.waist_roll_torque:+.1f}Nm "
+      f"waist_ypr=({np.rad2deg(self.waist_angles['yaw']):+.1f},"
+      f"{np.rad2deg(self.waist_angles['pitch']):+.1f},"
+      f"{np.rad2deg(self.waist_angles['roll']):+.1f})deg "
+      f"waist_extra_tau=({self.waist_torques['yaw']:+.1f},"
+      f"{self.waist_torques['pitch']:+.1f},"
+      f"{self.waist_torques['roll']:+.1f})Nm "
+      f"waist_lock={'ON' if self.waist_lock_active else 'OFF'} "
+      f"lift_dz={attachment_pos[2] - self.lift_start_attachment_z if self.lift_start_attachment_z is not None else 0.0:+.3f}m "
+      f"wide={'ON' if self.wide_posture_ready else 'OFF'} "
+      f"torso_rel_rpy=({np.rad2deg(self.torso_relative_rpy[0]):+.1f},"
+      f"{np.rad2deg(self.torso_relative_rpy[1]):+.1f},"
+      f"{np.rad2deg(self.torso_relative_rpy[2]):+.1f})deg "
       f"z_back={attachment_pos[2]:.3f}m "
       f"vz={vz:+.3f}m/s",
       flush=True,
@@ -831,6 +949,13 @@ class WireAssistWrapper:
     self.torso_roll = 0.0
     self.waist_roll_angle = 0.0
     self.waist_roll_torque = 0.0
+    self.waist_angles = {axis: 0.0 for axis in ("yaw", "roll", "pitch")}
+    self.waist_torques = {axis: 0.0 for axis in ("yaw", "roll", "pitch")}
+    self.torso_relative_rpy = np.zeros(3, dtype=np.float64)
+    self.waist_lock_active = False
+    self.lift_start_attachment_z = None
+    self.wide_posture_ready = False
+    self.brace_start_action = None
     self.last_log_step = -1
 
     # At this point MJLab has already called sim.forward(), so all poses describe
@@ -858,14 +983,30 @@ class WireAssistWrapper:
     heading_aligned = self._set_walking_command(yaw, allow_forward=False)
     desired = self._inextensible_cable_tension(attachment_pos) if heading_aligned else 0.0
     self._apply_cable_force(body_com, attachment_pos, desired)
+    if self.phase == self.PHASE_LIFT:
+      if self.lift_start_attachment_z is None:
+        self.lift_start_attachment_z = float(attachment_pos[2])
+      lifted_height = attachment_pos[2] - self.lift_start_attachment_z
+      if (
+        not self.wide_posture_ready
+        and self._phase_time() >= self.wide_posture_delay
+        and lifted_height >= self.wide_posture_lift_height
+      ):
+        self.wide_posture_ready = True
+        print(
+          f"[WIRE] robot lifted {lifted_height:.3f}m; opening arms and legs",
+          flush=True,
+        )
     waist_control_enabled = (
-      self.phase in (self.PHASE_LIFT, self.PHASE_CROSS, self.PHASE_LOWER)
-      or (
-        self.phase == self.PHASE_SETTLE
-        and self._phase_time() >= self.pre_lift_stand_time
+      self.phase in (
+        self.PHASE_LIFT,
+        self.PHASE_CROSS,
+        self.PHASE_LOWER,
+        self.PHASE_ASSIST,
       )
     )
-    self._apply_waist_roll_control(waist_control_enabled)
+    self.waist_lock_active = waist_control_enabled
+    self._update_waist_diagnostics()
     release_ready = (
       self.phase == self.PHASE_RELEASE
       and self._phase_time() >= self.release_min_time
@@ -897,16 +1038,12 @@ class WireAssistWrapper:
     desired_posture_mode = None
     target_posture = None
     transition_time = self.posture_blend_time
-    if self.phase == self.PHASE_LIFT or (
-      self.phase == self.PHASE_SETTLE
-      and self._phase_time() >= self.pre_lift_stand_time
-    ):
+    if self.phase == self.PHASE_LIFT and self.wide_posture_ready:
       desired_posture_mode = "wide_lift"
       target_posture = self.lift_posture_action
     elif self.phase in (self.PHASE_CROSS, self.PHASE_LOWER):
-      desired_posture_mode = "landing"
-      target_posture = self.landing_posture_action
-      transition_time = self.landing_posture_blend_time
+      desired_posture_mode = "wide_lift"
+      target_posture = self.lift_posture_action
 
     if desired_posture_mode is not None and desired_posture_mode != self.posture_mode:
       self.posture_mode = desired_posture_mode
@@ -967,6 +1104,19 @@ class WireAssistWrapper:
         self.posture_lock_active = False
       if self.phase != self.PHASE_SETTLE:
         self.posture_mode = None
+    if (
+      waist_control_enabled
+      and self.waist_action_indices
+      and self.lift_posture_action is not None
+    ):
+      action = action.clone()
+      waist_target = self.lift_posture_action.to(
+        device=action.device,
+        dtype=action.dtype,
+      )
+      action[:, self.waist_action_indices] = waist_target[
+        :, self.waist_action_indices
+      ]
     self.last_applied_action = action.detach().clone()
     result = self.env.step(action)
 

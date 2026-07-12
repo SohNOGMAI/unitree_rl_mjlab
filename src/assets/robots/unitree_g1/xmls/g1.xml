@@ -167,7 +167,7 @@
             <geom class="visual" pos="0.0039635 0 -0.044" material="black" mesh="head_link"/>
             <geom name="torso_collision" class="collision" size="0.09" fromto="0.01 0 0.08 0.01 0 0.2"/>
             <geom name="head_collision" class="collision" type="sphere" size="0.06" pos="0 0 .43"/>
-            <site name="wire_attachment" type="sphere" pos="0.01 0 0.40" size="0.035" rgba="1 0 1 1" group="0"/>
+            <site name="wire_attachment" type="sphere" pos="-0.14 0 0.40" size="0.035" rgba="1 0 1 1" group="0"/>
             <site name="imu_in_torso" size="0.01" pos="-0.03959 -0.00224 0.14792"/>
             <body name="left_shoulder_pitch_link" pos="0.0039563 0.10022 0.24778" quat="0.990264 0.139201 1.38722e-05 -9.86868e-05">
               <inertial pos="0 0.035892 -0.011628" quat="0.654152 0.0130458 -0.326267 0.68225" mass="0.718" diaginertia="0.000465864 0.000432842 0.000406394"/>
@@ -260,7 +260,7 @@
       <geom type="box" size="0.6 1.0 0.3" rgba="0.8 0.4 0.2 1" group="0" contype="0" conaffinity="0"/>
       <geom type="box" size="0.6 1.0 0.3" rgba="0.8 0.4 0.2 0" group="3" contype="15" conaffinity="15" condim="3" friction="1.5 0.005 0.0001"/>
     </body>
-    <body name="anchor_visual" pos="2.5 0 2.4">
+    <body name="anchor_visual" pos="2.3 0 2.4">
             <geom type="sphere" size="0.06" rgba="0.2 0.9 0.2 0.8" group="0" contype="0" conaffinity="0" />
             <site name="wire_anchor" pos="0 0 0" size="0.001" rgba="0 0 0 0" />
     </body>
@@ -272,7 +272,7 @@
     <exclude body1="pelvis" body2="left_hip_roll_link"/>
   </contact>
   <tendon>
-    <spatial name="wire_visual" width="0.008" rgba="0.85 0.1 0.85 0.9">
+    <spatial name="wire_visual" width="0.008" rgba="0.1 0.35 1 0.95">
       <site site="wire_attachment"/>
       <site site="wire_anchor"/>
     </spatial>
