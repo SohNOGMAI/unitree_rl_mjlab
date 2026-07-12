@@ -54,13 +54,13 @@ class WireAssistWrapper:
     self,
     env,
     anchor_pos=(2.5, 0.0, 2.4),
-    attachment_pos_b=(-0.04, 0.0, 0.30),
+    attachment_pos_b=(-0.14, 0.0, 0.40),
     obstacle_body_names=("obstacle_box", "obstacle", "wall_front"),
     lin_vel_x=1.0,
-    heading_kp=2.0,
-    max_yaw_rate=0.8,
+    heading_kp=0.0,
+    max_yaw_rate=0.0,
     turn_in_place_threshold=np.deg2rad(8.0),
-    approach_distance=0.40,
+    approach_distance=0.30,
     clearance=0.10,
     lift_kp=50.0,
     lift_kd=90.0,
@@ -69,23 +69,23 @@ class WireAssistWrapper:
     max_tension=40.0 * 9.80665,
     tension_rate=1200.0,
     tension_release_rate=200.0,
-    reel_in_speed=0.12,
+    reel_in_speed=0.10,
     payout_speed=0.10,
     max_reel_in=1.00,
-    hoist_target_wire_length=0.75,
+    hoist_target_wire_length=0.60,
     winch_kp=1500.0,
     winch_kd=120.0,
     constraint_kp=500.0,
-    constraint_kd=220.0,
-    wire_acceleration=0.15,
+    constraint_kd=350.0,
+    wire_acceleration=0.025,
     wire_rate_filter_alpha=0.15,
     hold_length_tolerance=0.025,
     hold_rate_tolerance=0.06,
     lower_release_delay=0.75,
-    lower_max_time=5.0,
-    yaw_stabilization_kp=18.0,
-    yaw_stabilization_kd=6.0,
-    max_yaw_stabilization_torque=15.0,
+    lower_max_time=3.0,
+    yaw_stabilization_kp=0.0,
+    yaw_stabilization_kd=0.0,
+    max_yaw_stabilization_torque=0.0,
     vertical_alignment_tolerance=0.08,
     wire_length_tolerance=0.02,
     lift_target_velocity=0.12,
@@ -99,6 +99,9 @@ class WireAssistWrapper:
     lift_detect_height=0.02,
     lift_detect_tension=300.0,
     posture_blend_time=1.0,
+    landing_posture_blend_time=1.0,
+    post_release_settle_time=1.5,
+    policy_resume_blend_time=1.5,
     posture_action_limit=3.5,
     policy_action_filter_alpha=0.08,
     settle_time=2.0,
@@ -156,6 +159,9 @@ class WireAssistWrapper:
     self.lift_detect_height = lift_detect_height
     self.lift_detect_tension = lift_detect_tension
     self.posture_blend_time = posture_blend_time
+    self.landing_posture_blend_time = landing_posture_blend_time
+    self.post_release_settle_time = post_release_settle_time
+    self.policy_resume_blend_time = policy_resume_blend_time
     self.posture_action_limit = posture_action_limit
     self.policy_action_filter_alpha = policy_action_filter_alpha
     self.settle_time = settle_time
@@ -213,6 +219,7 @@ class WireAssistWrapper:
     self.posture_lock_step = None
     self.posture_lock_start_action = None
     self.lift_posture_action = self._build_lift_posture_action()
+    self.landing_posture_action = self._build_landing_posture_action()
     self.filtered_lift_velocity = 0.0
     self.filtered_wire_rate = 0.0
     self.commanded_wire_rate = 0.0
@@ -222,6 +229,10 @@ class WireAssistWrapper:
     self.heading_error = 0.0
     self.lower_command_complete_step = None
     self.filtered_policy_action = None
+    self.posture_mode = None
+    self.last_applied_action = None
+    self.release_ready_step = None
+    self.torso_roll = 0.0
     self.step_counter = 0
     self.last_log_step = -1
 
@@ -246,7 +257,58 @@ class WireAssistWrapper:
     return -1
 
   def _build_lift_posture_action(self):
-    """Build a compact, symmetric seated-tuck posture for suspension."""
+    """Wide posture: high yaw inertia and a broad front contact envelope."""
+    return self._build_posture_action(
+      {
+        "left_hip_pitch_joint": -0.15,
+        "right_hip_pitch_joint": -0.15,
+        "left_hip_roll_joint": 0.35,
+        "right_hip_roll_joint": -0.35,
+        "left_knee_joint": 0.35,
+        "right_knee_joint": 0.35,
+        "left_ankle_pitch_joint": -0.18,
+        "right_ankle_pitch_joint": -0.18,
+        "left_ankle_roll_joint": 0.0,
+        "right_ankle_roll_joint": 0.0,
+        "waist_yaw_joint": 0.0,
+        "waist_roll_joint": 0.0,
+        "waist_pitch_joint": 0.0,
+        "left_shoulder_pitch_joint": 0.30,
+        "right_shoulder_pitch_joint": 0.30,
+        "left_shoulder_roll_joint": 1.10,
+        "right_shoulder_roll_joint": -1.10,
+        "left_elbow_joint": 0.40,
+        "right_elbow_joint": 0.40,
+      }
+    )
+
+  def _build_landing_posture_action(self):
+    """Feet-down, slightly crouched posture held through touchdown."""
+    return self._build_posture_action(
+      {
+        "left_hip_pitch_joint": -0.25,
+        "right_hip_pitch_joint": -0.25,
+        "left_hip_roll_joint": 0.08,
+        "right_hip_roll_joint": -0.08,
+        "left_knee_joint": 0.55,
+        "right_knee_joint": 0.55,
+        "left_ankle_pitch_joint": -0.30,
+        "right_ankle_pitch_joint": -0.30,
+        "left_ankle_roll_joint": 0.0,
+        "right_ankle_roll_joint": 0.0,
+        "waist_yaw_joint": 0.0,
+        "waist_roll_joint": 0.0,
+        "waist_pitch_joint": 0.0,
+        "left_shoulder_pitch_joint": 0.0,
+        "right_shoulder_pitch_joint": 0.0,
+        "left_shoulder_roll_joint": 0.25,
+        "right_shoulder_roll_joint": -0.25,
+        "left_elbow_joint": 0.55,
+        "right_elbow_joint": 0.55,
+      }
+    )
+
+  def _build_posture_action(self, desired):
     action_manager = getattr(self.env.unwrapped, "action_manager", None)
     if action_manager is None:
       return None
@@ -256,19 +318,6 @@ class WireAssistWrapper:
     except (KeyError, AttributeError):
       return None
 
-    desired = {
-      "left_hip_pitch_joint": -0.90,
-      "right_hip_pitch_joint": -0.90,
-      "left_knee_joint": 1.40,
-      "right_knee_joint": 1.40,
-      "left_ankle_pitch_joint": -0.55,
-      "right_ankle_pitch_joint": -0.55,
-      "waist_pitch_joint": 0.25,
-      "left_shoulder_pitch_joint": -0.50,
-      "right_shoulder_pitch_joint": -0.50,
-      "left_elbow_joint": 1.30,
-      "right_elbow_joint": 1.30,
-    }
     posture = torch.zeros_like(term.raw_action)
     for index, name in enumerate(names):
       if name not in desired:
@@ -302,29 +351,16 @@ class WireAssistWrapper:
     return (angle + np.pi) % (2.0 * np.pi) - np.pi
 
   def _set_walking_command(self, yaw=None, allow_forward=True):
-    """Face the anchor initially and continuously reject later yaw drift."""
+    """Command forward motion only; active yaw control is disabled."""
     command_manager = getattr(self.env.unwrapped, "command_manager", None)
     if command_manager is None:
       return False
-    aligned = False
     try:
       command = command_manager.get_command("twist")
-      linear_velocity = 0.0
-      yaw_rate = 0.0
-      if yaw is not None and self.target_heading is not None:
-        heading_error = self._wrap_to_pi(self.target_heading - yaw)
-        self.heading_error = heading_error
-        yaw_rate = float(
-          np.clip(self.heading_kp * heading_error, -self.max_yaw_rate, self.max_yaw_rate)
-        )
-        if self.heading_aligned or abs(heading_error) <= self.turn_in_place_threshold:
-          self.heading_aligned = True
-          aligned = True
-          linear_velocity = self.lin_vel_x if allow_forward else 0.0
-          if abs(heading_error) <= np.deg2rad(1.0):
-            yaw_rate = 0.0
+      self.heading_aligned = True
+      self.heading_error = 0.0
       target = torch.tensor(
-        [linear_velocity, 0.0, yaw_rate],
+        [self.lin_vel_x if allow_forward else 0.0, 0.0, 0.0],
         device=command.device,
         dtype=command.dtype,
       )
@@ -332,7 +368,7 @@ class WireAssistWrapper:
         command[:] = target
     except (KeyError, AttributeError):
       return False
-    return aligned
+    return True
 
   def _obstacle_bounds(self):
     geom_xpos = getattr(self.mj_data, "geom_xpos", None)
@@ -359,7 +395,9 @@ class WireAssistWrapper:
     attachment_pos = torso_pos + rotation.apply(self.attachment_pos_b)
     robot_com = self._env0(self.mj_data.subtree_com, self.robot_root_id)
     body_com = self._env0(self.mj_data.xipos, self.body_id)
-    pitch = rotation.as_euler("xyz", degrees=False)[1]
+    torso_euler = rotation.as_euler("xyz", degrees=False)
+    self.torso_roll = float(torso_euler[0])
+    pitch = torso_euler[1]
     root_quat_wxyz = self._env0(self.mj_data.xquat, self.robot_root_id)
     root_rotation = R.from_quat(
       [root_quat_wxyz[1], root_quat_wxyz[2], root_quat_wxyz[3], root_quat_wxyz[0]]
@@ -510,25 +548,8 @@ class WireAssistWrapper:
     cable = self.anchor_pos - attachment_pos
     cable_length = np.linalg.norm(cable)
     force = np.zeros(3) if cable_length < 1e-6 else self.tension * cable / cable_length
+    # Apply only the moment generated by the real rear attachment point.
     torque = np.cross(attachment_pos - body_com, force)
-    if self.phase in (
-      self.PHASE_SETTLE,
-      self.PHASE_LIFT,
-      self.PHASE_CROSS,
-      self.PHASE_LOWER,
-      self.PHASE_RELEASE,
-    ):
-      anti_twist_torque = (
-        self.yaw_stabilization_kp * self.heading_error
-        - self.yaw_stabilization_kd * self.filtered_yaw_rate
-      )
-      torque[2] += float(
-        np.clip(
-          anti_twist_torque,
-          -self.max_yaw_stabilization_torque,
-          self.max_yaw_stabilization_torque,
-        )
-      )
     wrench = np.concatenate((force, torque)).astype(np.float32)
 
     xfrc = self.mj_data.xfrc_applied
@@ -665,6 +686,7 @@ class WireAssistWrapper:
       f"T={self.tension:6.1f}/{self.desired_tension:6.1f}N "
       f"yaw_err={np.rad2deg(self.heading_error):+.1f}deg "
       f"yaw_rate={np.rad2deg(self.filtered_yaw_rate):+.1f}deg/s "
+      f"roll={np.rad2deg(self.torso_roll):+.1f}deg "
       f"z_back={attachment_pos[2]:.3f}m "
       f"vz={vz:+.3f}m/s",
       flush=True,
@@ -697,6 +719,10 @@ class WireAssistWrapper:
     self.heading_error = 0.0
     self.lower_command_complete_step = None
     self.filtered_policy_action = None
+    self.posture_mode = None
+    self.last_applied_action = None
+    self.release_ready_step = None
+    self.torso_roll = 0.0
     self.last_log_step = -1
 
     # At this point MJLab has already called sim.forward(), so all poses describe
@@ -724,64 +750,85 @@ class WireAssistWrapper:
     heading_aligned = self._set_walking_command(yaw, allow_forward=False)
     desired = self._inextensible_cable_tension(attachment_pos) if heading_aligned else 0.0
     self._apply_cable_force(body_com, attachment_pos, desired)
-    if (
+    release_ready = (
       self.phase == self.PHASE_RELEASE
       and self._phase_time() >= self.release_min_time
       and self.tension <= self.release_tension_threshold
+    )
+    if release_ready and self.release_ready_step is None:
+      self.release_ready_step = self.step_counter
+      print("[WIRE] tension released; holding landing posture", flush=True)
+    if (
+      self.phase == self.PHASE_RELEASE
+      and self.release_ready_step is not None
+      and (self.step_counter - self.release_ready_step) * self.dt
+      >= self.post_release_settle_time
     ):
       self._set_phase(self.PHASE_DONE)
     self._log_wire_state(attachment_pos, vz)
-    allow_forward = self.phase in (self.PHASE_APPROACH, self.PHASE_DONE)
-    self._set_walking_command(yaw, allow_forward=allow_forward)
-    suspended_phase = self.phase in (
-      self.PHASE_LIFT,
-      self.PHASE_CROSS,
-      self.PHASE_LOWER,
-      self.PHASE_RELEASE,
+    allow_forward = self.phase == self.PHASE_APPROACH or (
+      self.phase == self.PHASE_DONE
+      and self._phase_time() >= self.policy_resume_blend_time
     )
-    if suspended_phase:
-      if self.filtered_policy_action is None:
-        self.filtered_policy_action = action.detach().clone()
-      else:
-        self.filtered_policy_action += self.policy_action_filter_alpha * (
-          action - self.filtered_policy_action
-        )
-      action = self.filtered_policy_action
-    else:
-      self.filtered_policy_action = None
-    if (
-      self.lock_posture_during_lift
-      and not self.posture_lock_active
-      and self.phase == self.PHASE_LIFT
-      and self.nominal_attachment_z is not None
-      and self.tension >= self.lift_detect_tension
-      and (
-        vz >= self.lift_detect_velocity
-        or attachment_pos[2] - self.nominal_attachment_z >= self.lift_detect_height
-      )
-    ):
+    self._set_walking_command(yaw, allow_forward=allow_forward)
+
+    desired_posture_mode = None
+    target_posture = None
+    transition_time = self.posture_blend_time
+    if self.phase in (self.PHASE_SETTLE, self.PHASE_LIFT):
+      desired_posture_mode = "wide_lift"
+      target_posture = self.lift_posture_action
+    elif self.phase in (self.PHASE_CROSS, self.PHASE_LOWER, self.PHASE_RELEASE):
+      desired_posture_mode = "landing"
+      target_posture = self.landing_posture_action
+      transition_time = self.landing_posture_blend_time
+
+    if desired_posture_mode is not None and desired_posture_mode != self.posture_mode:
+      self.posture_mode = desired_posture_mode
       self.posture_lock_active = True
       self.posture_lock_step = self.step_counter
-      self.posture_lock_start_action = action.detach().clone()
-    if self.phase == self.PHASE_DONE:
-      self.posture_lock_active = False
+      self.posture_lock_start_action = (
+        self.last_applied_action.detach().clone()
+        if self.last_applied_action is not None
+        else action.detach().clone()
+      )
+      print(f"[WIRE] posture locked: {desired_posture_mode}", flush=True)
+
     if (
-      self.lock_posture_during_lift
-      and self.posture_lock_active
-      and self.lift_posture_action is not None
+      desired_posture_mode is not None
       and self.posture_lock_start_action is not None
       and self.posture_lock_step is not None
     ):
       blend = np.clip(
         (self.step_counter - self.posture_lock_step) * self.dt
-        / self.posture_blend_time,
+        / transition_time,
         0.0,
         1.0,
       )
-      target_action = self.lift_posture_action.to(
-        device=action.device, dtype=action.dtype
+      target_action = (
+        target_posture.to(device=action.device, dtype=action.dtype)
+        if target_posture is not None
+        else torch.zeros_like(action)
       )
       action = (1.0 - blend) * self.posture_lock_start_action + blend * target_action
+    elif self.phase == self.PHASE_DONE and self.posture_lock_active:
+      landing_action = (
+        self.landing_posture_action.to(device=action.device, dtype=action.dtype)
+        if self.landing_posture_action is not None
+        else torch.zeros_like(action)
+      )
+      resume_blend = np.clip(
+        self._phase_time() / self.policy_resume_blend_time,
+        0.0,
+        1.0,
+      )
+      action = (1.0 - resume_blend) * landing_action + resume_blend * action
+      if resume_blend >= 1.0:
+        self.posture_lock_active = False
+        self.posture_mode = None
+        print("[WIRE] walking policy fully restored", flush=True)
+
+    self.last_applied_action = action.detach().clone()
     result = self.env.step(action)
 
     # ManagerBasedRlEnv performs automatic episode resets inside step().  That
