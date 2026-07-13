@@ -121,13 +121,6 @@ class WireAssistWrapper:
     brace_action_rate_limit=0.80,
     wide_posture_blend_time=4.0,
     wide_posture_action_rate_limit=0.35,
-    pre_lift_posture_tolerance=0.03,
-    pre_lift_posture_hold_time=0.5,
-    settle_wire_preload=0.01,
-    settle_support_ratio=0.25,
-    settle_max_tension=160.0,
-    settle_wire_kp=800.0,
-    settle_wire_kd=120.0,
     down_posture_blend_time=3.0,
     down_posture_action_rate_limit=0.30,
     posture_blend_time=0.5,
@@ -220,13 +213,6 @@ class WireAssistWrapper:
     self.brace_action_rate_limit = brace_action_rate_limit
     self.wide_posture_blend_time = wide_posture_blend_time
     self.wide_posture_action_rate_limit = wide_posture_action_rate_limit
-    self.pre_lift_posture_tolerance = pre_lift_posture_tolerance
-    self.pre_lift_posture_hold_time = pre_lift_posture_hold_time
-    self.settle_wire_preload = settle_wire_preload
-    self.settle_support_ratio = settle_support_ratio
-    self.settle_max_tension = settle_max_tension
-    self.settle_wire_kp = settle_wire_kp
-    self.settle_wire_kd = settle_wire_kd
     self.down_posture_blend_time = down_posture_blend_time
     self.down_posture_action_rate_limit = down_posture_action_rate_limit
     self.posture_blend_time = posture_blend_time
@@ -312,7 +298,6 @@ class WireAssistWrapper:
     self.initial_wire_length = None
     self.target_wire_length = None
     self.release_target_wire_length = None
-    self.settle_wire_length = None
     self.posture_lock_active = False
     self.posture_lock_step = None
     self.posture_lock_start_action = None
@@ -323,7 +308,6 @@ class WireAssistWrapper:
     self.down_posture_action = self._build_down_posture_action()
     self.waist_action_indices = []
     self.brace_action_indices = []
-    self.ground_prepose_action_indices = []
     action_manager = getattr(self.env.unwrapped, "action_manager", None)
     if action_manager is not None:
       try:
@@ -349,30 +333,11 @@ class WireAssistWrapper:
             )
           )
         ]
-        self.ground_prepose_action_indices = [
-          index
-          for index, name in enumerate(joint_term.target_names)
-          if any(
-            name.endswith(suffix)
-            for suffix in (
-              "hip_roll_joint",
-              "ankle_roll_joint",
-              "shoulder_pitch_joint",
-              "shoulder_roll_joint",
-              "elbow_joint",
-            )
-          )
-        ]
       except (KeyError, AttributeError):
         pass
     print(
       f"[WIRE] waist action indices locked during lift-assist: "
       f"{self.waist_action_indices}",
-      flush=True,
-    )
-    print(
-      "[WIRE] policy-supported ground prepose indices: "
-      f"{self.ground_prepose_action_indices}",
       flush=True,
     )
     self.filtered_lift_velocity = 0.0
@@ -396,8 +361,6 @@ class WireAssistWrapper:
     self.waist_lock_active = False
     self.lift_start_attachment_z = None
     self.wide_posture_ready = False
-    self.pre_lift_posture_settled_step = None
-    self.pre_lift_posture_error = float("nan")
     self.brace_start_action = None
     self.brace_start_step = None
     self.step_counter = 0
@@ -988,27 +951,11 @@ class WireAssistWrapper:
               self.target_wire_length,
             )
           )
-        self.settle_wire_length = max(
-          actual_length - self.settle_wire_preload,
-          0.05,
-        )
-        print(
-          "[WIRE] SETTLE cable length latched: "
-          f"Lsettle={self.settle_wire_length:.3f}m",
-          flush=True,
-        )
         self._set_phase(self.PHASE_SETTLE)
 
     if self.phase == self.PHASE_SETTLE:
-      # Hold the entry length instead of following the measured length.  A
-      # capped support tension then restrains torso translation while the
-      # standing policy performs the ground pre-pose transition.
-      if self.settle_wire_length is None:
-        self.settle_wire_length = max(
-          actual_length - self.settle_wire_preload,
-          0.05,
-        )
-      self.commanded_wire_length = self.settle_wire_length
+      # The cable remains slack while the ordinary standing policy settles.
+      self.commanded_wire_length = actual_length
       self.initial_wire_length = actual_length
       if (
         self.traversal_mode == "ascend"
@@ -1016,30 +963,11 @@ class WireAssistWrapper:
       ):
         self.release_target_wire_length = actual_length
 
-    posture_hold_complete = (
-      self.pre_lift_posture_settled_step is not None
-      and (
-        self.step_counter - self.pre_lift_posture_settled_step
-      )
-      * self.dt
-      >= self.pre_lift_posture_hold_time
+    pre_lift_time = max(
+      self.settle_time,
+      self.brace_start_time + self.brace_blend_time,
     )
-    if self.phase == self.PHASE_SETTLE and posture_hold_complete:
-      # Recompute the LIFT target only after the on-ground posture transition.
-      self.initial_wire_length = actual_length
-      if self.traversal_mode == "descend":
-        self._configure_descent_wire_targets(
-          attachment_pos,
-          actual_length,
-          box_bottom,
-          box_top,
-          announce=True,
-        )
-      else:
-        self.target_wire_length = max(
-          min(self.hoist_target_wire_length, actual_length),
-          0.05,
-        )
+    if self.phase == self.PHASE_SETTLE and self._phase_time() >= pre_lift_time:
       self._set_phase(self.PHASE_LIFT)
 
     if self.phase == self.PHASE_LIFT:
@@ -1121,18 +1049,6 @@ class WireAssistWrapper:
     length_error = actual_length - self.commanded_wire_length
     rate_error = self.filtered_wire_rate - commanded_rate
     vertical_fraction = max(cable[2] / actual_length, 0.05)
-    if self.phase == self.PHASE_SETTLE:
-      support_tension = (
-        self.settle_support_ratio * self.robot_weight / vertical_fraction
-      )
-      settle_tension = (
-        support_tension
-        + self.settle_wire_kp * length_error
-        + self.settle_wire_kd * rate_error
-      )
-      return float(
-        np.clip(settle_tension, 0.0, self.settle_max_tension)
-      )
     tension = (
       self.robot_weight / vertical_fraction
       + self.constraint_kp * length_error
@@ -1145,7 +1061,12 @@ class WireAssistWrapper:
       length_settled = abs(length_error) <= self.hold_length_tolerance
       rate_settled = abs(self.filtered_wire_rate) <= self.hold_rate_tolerance
       command_finished = self.commanded_wire_length <= self.target_wire_length + 1e-6
-      if command_finished and length_settled and rate_settled:
+      if (
+        command_finished
+        and length_settled
+        and rate_settled
+        and self.wide_posture_ready
+      ):
         self._set_phase(self.PHASE_CROSS)
     elif self.phase == self.PHASE_LOWER:
       release_delay_elapsed = (
@@ -1157,6 +1078,7 @@ class WireAssistWrapper:
         self._set_phase(self.PHASE_ASSIST)
     if self.phase in (
       self.PHASE_APPROACH,
+      self.PHASE_SETTLE,
       self.PHASE_RELEASE,
       self.PHASE_DONE,
     ):
@@ -1177,7 +1099,6 @@ class WireAssistWrapper:
       f"Lcmd={commanded if commanded is not None else float('nan'):.3f}m "
       f"Ltarget={target if target is not None else float('nan'):.3f}m "
       f"Lrelease={self.release_target_wire_length if self.release_target_wire_length is not None else float('nan'):.3f}m "
-      f"Lsettle={self.settle_wire_length if self.settle_wire_length is not None else float('nan'):.3f}m "
       f"Ldot={self.filtered_wire_rate:+.3f}m/s "
       f"Ldot_cmd={self.commanded_wire_rate:+.3f}m/s "
       f"T={self.tension:6.1f}/{self.desired_tension:6.1f}N "
@@ -1192,7 +1113,6 @@ class WireAssistWrapper:
       f"{self.waist_torques['roll']:+.1f})Nm "
       f"waist_lock={'ON' if self.waist_lock_active else 'OFF'} "
       f"posture={self.posture_mode or 'policy'} "
-      f"prepose_err={self.pre_lift_posture_error:.3f} "
       f"lift_dz={attachment_pos[2] - self.lift_start_attachment_z if self.lift_start_attachment_z is not None else 0.0:+.3f}m "
       f"wide={'ON' if self.wide_posture_ready else 'OFF'} "
       f"torso_rel_rpy=({np.rad2deg(self.torso_relative_rpy[0]):+.1f},"
@@ -1219,7 +1139,6 @@ class WireAssistWrapper:
     self.initial_wire_length = None
     self.target_wire_length = None
     self.release_target_wire_length = None
-    self.settle_wire_length = None
     self.posture_lock_active = False
     self.posture_lock_step = None
     self.posture_lock_start_action = None
@@ -1244,8 +1163,6 @@ class WireAssistWrapper:
     self.waist_lock_active = False
     self.lift_start_attachment_z = None
     self.wide_posture_ready = False
-    self.pre_lift_posture_settled_step = None
-    self.pre_lift_posture_error = float("nan")
     self.brace_start_action = None
     self.last_log_step = -1
 
@@ -1278,13 +1195,12 @@ class WireAssistWrapper:
       if self.lift_start_attachment_z is None:
         self.lift_start_attachment_z = float(attachment_pos[2])
       lifted_height = attachment_pos[2] - self.lift_start_attachment_z
-      posture_ready = lifted_height >= self.wide_posture_lift_height
-      if self.traversal_mode == "descend":
-        posture_ready = (
-          lifted_height >= 0.01
-          or self.tension >= 0.70 * self.robot_weight
-          or self._phase_time() >= self.wide_posture_delay + 0.5
-        )
+      required_lift_height = (
+        0.01
+        if self.traversal_mode == "descend"
+        else self.wide_posture_lift_height
+      )
+      posture_ready = lifted_height >= required_lift_height
       if (
         not self.wide_posture_ready
         and self._phase_time() >= self.wide_posture_delay
@@ -1297,8 +1213,8 @@ class WireAssistWrapper:
           flush=True,
         )
     waist_control_enabled = (
-      self.phase in (
-        self.PHASE_LIFT,
+      (self.phase == self.PHASE_LIFT and self.wide_posture_ready)
+      or self.phase in (
         self.PHASE_CROSS,
         self.PHASE_LOWER,
         self.PHASE_ASSIST,
@@ -1338,24 +1254,18 @@ class WireAssistWrapper:
     target_posture = None
     transition_time = self.posture_blend_time
     action_rate_limit = None
-    if self.phase == self.PHASE_SETTLE:
-      # Keep the standing policy active for the sagittal support joints.  Only
-      # yaw-sensitive lateral stance joints and the arms approach the fixed
-      # suspension pose while both feet remain on the support surface.
-      desired_posture_mode = f"{self.traversal_mode}_ground_prepose"
+    if self.phase == self.PHASE_LIFT and self.wide_posture_ready:
       if self.traversal_mode == "descend":
+        desired_posture_mode = "descent_feet_down"
         target_posture = self.descent_posture_action
         transition_time = self.descent_posture_blend_time
         action_rate_limit = self.descent_posture_action_rate_limit
       else:
+        desired_posture_mode = "wide_lift"
         target_posture = self.lift_posture_action
         transition_time = self.wide_posture_blend_time
         action_rate_limit = self.wide_posture_action_rate_limit
-    elif self.phase in (
-      self.PHASE_LIFT,
-      self.PHASE_CROSS,
-      self.PHASE_LOWER,
-    ):
+    elif self.phase in (self.PHASE_CROSS, self.PHASE_LOWER):
       if self.traversal_mode == "descend":
         desired_posture_mode = "descent_feet_down"
         target_posture = self.descent_posture_action
@@ -1394,51 +1304,13 @@ class WireAssistWrapper:
         if target_posture is not None
         else torch.zeros_like(action)
       )
-      if self.phase == self.PHASE_SETTLE:
-        # ``action`` is the current standing-policy output.  Preserve it for
-        # hip/knee/ankle pitch and all other balance joints; interpolate only
-        # the selected lateral stance and arm joints.
-        indices = self.ground_prepose_action_indices
-        policy_supported_action = action.clone()
-        policy_supported_action[:, indices] = (
-          (1.0 - blend) * self.posture_lock_start_action[:, indices]
-          + blend * target_action[:, indices]
-        )
-        action = self._rate_limit_action(
-          policy_supported_action,
-          self.last_applied_action,
-          action_rate_limit,
-          indices=indices,
-        )
-        posture_error = float(
-          torch.max(
-            torch.abs(action[:, indices] - target_action[:, indices])
-          ).item()
-        )
-        self.pre_lift_posture_error = posture_error
-        posture_settled = (
-          self._phase_time() >= self.settle_time
-          and posture_error <= self.pre_lift_posture_tolerance
-        )
-        if posture_settled and self.pre_lift_posture_settled_step is None:
-          self.pre_lift_posture_settled_step = self.step_counter
-          self.wide_posture_ready = True
-          print(
-            "[WIRE] pre-lift posture settled on support; "
-            f"holding for {self.pre_lift_posture_hold_time:.2f}s",
-            flush=True,
-          )
-        elif not posture_settled:
-          self.pre_lift_posture_settled_step = None
-          self.wide_posture_ready = False
-      else:
-        action = (
-          (1.0 - blend) * self.posture_lock_start_action
-          + blend * target_action
-        )
-        action = self._rate_limit_action(
-          action, self.last_applied_action, action_rate_limit
-        )
+      action = (
+        (1.0 - blend) * self.posture_lock_start_action
+        + blend * target_action
+      )
+      action = self._rate_limit_action(
+        action, self.last_applied_action, action_rate_limit
+      )
     elif self.phase == self.PHASE_ASSIST:
       if self.posture_mode != "assist_policy_blend":
         self.posture_mode = "assist_policy_blend"
