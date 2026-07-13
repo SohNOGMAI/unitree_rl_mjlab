@@ -55,6 +55,7 @@ class WireAssistWrapper:
   def __init__(
     self,
     env,
+    traversal_mode="ascend",
     anchor_pos=(2.5, 0.0, 2.4),
     attachment_pos_b=(-0.14, 0.0, 0.40),
     obstacle_body_names=("obstacle_box", "obstacle", "wall_front"),
@@ -62,7 +63,7 @@ class WireAssistWrapper:
     heading_kp=0.0,
     max_yaw_rate=0.0,
     turn_in_place_threshold=np.deg2rad(8.0),
-    approach_distance=1.5,
+    approach_distance=0.35,
     clearance=0.10,
     lift_kp=50.0,
     lift_kd=90.0,
@@ -83,6 +84,16 @@ class WireAssistWrapper:
     constraint_kd=350.0,
     wire_acceleration=0.025,
     payout_acceleration=0.10,
+    descent_approach_distance=0.32,
+    descent_preload_reel_in=0.16,
+    descent_release_wire_length=None,
+    descent_landing_length_margin=0.15,
+    descent_reel_in_speed=0.030,
+    descent_payout_speed=0.10,
+    descent_payout_acceleration=0.04,
+    descent_hold_time=0.5,
+    descent_posture_blend_time=2.5,
+    descent_posture_action_rate_limit=0.40,
     wire_rate_filter_alpha=0.15,
     hold_length_tolerance=0.025,
     hold_rate_tolerance=0.06,
@@ -131,6 +142,12 @@ class WireAssistWrapper:
     log_interval=0.25,
   ):
     self.env = env
+    if traversal_mode not in ("ascend", "descend"):
+      raise ValueError(
+        "traversal_mode must be either 'ascend' or 'descend', "
+        f"got {traversal_mode!r}"
+      )
+    self.traversal_mode = traversal_mode
     self.anchor_pos = np.asarray(anchor_pos, dtype=np.float64)
     if self.anchor_pos.shape == (2,):
       self.anchor_pos = np.array([self.anchor_pos[0], 0.0, self.anchor_pos[1]])
@@ -157,6 +174,18 @@ class WireAssistWrapper:
     self.constraint_kd = constraint_kd
     self.wire_acceleration = wire_acceleration
     self.payout_acceleration = payout_acceleration
+    self.descent_approach_distance = descent_approach_distance
+    self.descent_preload_reel_in = descent_preload_reel_in
+    self.descent_release_wire_length = descent_release_wire_length
+    self.descent_landing_length_margin = descent_landing_length_margin
+    self.descent_reel_in_speed = descent_reel_in_speed
+    self.descent_payout_speed = descent_payout_speed
+    self.descent_payout_acceleration = descent_payout_acceleration
+    self.descent_hold_time = descent_hold_time
+    self.descent_posture_blend_time = descent_posture_blend_time
+    self.descent_posture_action_rate_limit = (
+      descent_posture_action_rate_limit
+    )
     self.wire_rate_filter_alpha = wire_rate_filter_alpha
     self.hold_length_tolerance = hold_length_tolerance
     self.hold_rate_tolerance = hold_rate_tolerance
@@ -271,6 +300,7 @@ class WireAssistWrapper:
     self.posture_lock_step = None
     self.posture_lock_start_action = None
     self.lift_posture_action = self._build_lift_posture_action()
+    self.descent_posture_action = self._build_descent_posture_action()
     self.landing_posture_action = self._build_landing_posture_action()
     self.brace_posture_action = self._build_brace_posture_action()
     self.down_posture_action = self._build_down_posture_action()
@@ -393,6 +423,37 @@ class WireAssistWrapper:
         "right_shoulder_roll_joint": -1.50,
         "left_elbow_joint": 0.35,
         "right_elbow_joint": 0.35,
+      }
+    )
+
+  def _build_descent_posture_action(self):
+    """Feet-down suspension posture for a controlled step descent.
+
+    The legs remain mildly abducted for lateral stability, while hip/knee/ankle
+    flexion keeps both soles below the pelvis and ready to accept ground load.
+    The arms increase yaw inertia without becoming the primary contact point.
+    """
+    return self._build_posture_action(
+      {
+        "left_hip_pitch_joint": -0.12,
+        "right_hip_pitch_joint": -0.12,
+        "left_hip_roll_joint": 0.26,
+        "right_hip_roll_joint": -0.26,
+        "left_knee_joint": 0.45,
+        "right_knee_joint": 0.45,
+        "left_ankle_pitch_joint": -0.28,
+        "right_ankle_pitch_joint": -0.28,
+        "left_ankle_roll_joint": -0.16,
+        "right_ankle_roll_joint": 0.16,
+        "waist_yaw_joint": 0.0,
+        "waist_roll_joint": 0.0,
+        "waist_pitch_joint": 0.0,
+        "left_shoulder_pitch_joint": 0.35,
+        "right_shoulder_pitch_joint": 0.35,
+        "left_shoulder_roll_joint": 1.10,
+        "right_shoulder_roll_joint": -1.10,
+        "left_elbow_joint": 0.50,
+        "right_elbow_joint": 0.50,
       }
     )
 
@@ -768,7 +829,7 @@ class WireAssistWrapper:
 
   def _inextensible_cable_tension(self, attachment_pos):
     """Reel an inextensible cable at constant speed to a fixed hoist length."""
-    box_front, _, _, _ = self._obstacle_bounds()
+    box_front, box_back, box_bottom, box_top = self._obstacle_bounds()
     cable = self.anchor_pos - attachment_pos
     actual_length = float(np.linalg.norm(cable))
     if actual_length < 1e-6:
@@ -785,19 +846,64 @@ class WireAssistWrapper:
     if self.phase == self.PHASE_APPROACH:
       self.commanded_wire_length = actual_length
       self.initial_wire_length = actual_length
-      if attachment_pos[0] >= box_front - self.approach_distance:
-        self.target_wire_length = max(
-          min(self.hoist_target_wire_length, self.initial_wire_length),
-          0.05,
-        )
-        self.release_target_wire_length = (
-          self.initial_wire_length
-          if self.configured_release_target_wire_length is None
-          else max(
-            float(self.configured_release_target_wire_length),
+      approach_edge = (
+        box_back if self.traversal_mode == "descend" else box_front
+      )
+      approach_distance = (
+        self.descent_approach_distance
+        if self.traversal_mode == "descend"
+        else self.approach_distance
+      )
+      if attachment_pos[0] >= approach_edge - approach_distance:
+        if self.traversal_mode == "descend":
+          # Preload the cable without hoisting the robot high above the top
+          # surface.  The forward-offset anchor then transfers the suspended
+          # body beyond the edge before controlled payout begins.
+          self.target_wire_length = max(
+            self.initial_wire_length - self.descent_preload_reel_in,
+            0.05,
+          )
+          attachment_height_above_support = max(
+            attachment_pos[2] - box_top,
+            0.0,
+          )
+          ground_attachment_z = (
+            box_bottom + attachment_height_above_support
+          )
+          computed_landing_length = (
+            self.anchor_pos[2]
+            - ground_attachment_z
+            + self.descent_landing_length_margin
+          )
+          requested_landing_length = (
+            computed_landing_length
+            if self.descent_release_wire_length is None
+            else float(self.descent_release_wire_length)
+          )
+          self.release_target_wire_length = max(
+            requested_landing_length,
             self.target_wire_length,
           )
-        )
+          print(
+            "[WIRE] descent profile armed: "
+            f"edge_x={box_back:.3f}m "
+            f"Lpreload={self.target_wire_length:.3f}m "
+            f"Llanding={self.release_target_wire_length:.3f}m",
+            flush=True,
+          )
+        else:
+          self.target_wire_length = max(
+            min(self.hoist_target_wire_length, self.initial_wire_length),
+            0.05,
+          )
+          self.release_target_wire_length = (
+            self.initial_wire_length
+            if self.configured_release_target_wire_length is None
+            else max(
+              float(self.configured_release_target_wire_length),
+              self.target_wire_length,
+            )
+          )
         self._set_phase(self.PHASE_SETTLE)
 
     if self.phase == self.PHASE_SETTLE:
@@ -821,7 +927,9 @@ class WireAssistWrapper:
       # velocity is essential.
       remaining = max(self.commanded_wire_length - self.target_wire_length, 0.0)
       reel_speed = min(
-        self.reel_in_speed,
+        self.descent_reel_in_speed
+        if self.traversal_mode == "descend"
+        else self.reel_in_speed,
         np.sqrt(2.0 * self.wire_acceleration * remaining),
       )
       self.commanded_wire_length = max(
@@ -829,7 +937,12 @@ class WireAssistWrapper:
         self.commanded_wire_length - reel_speed * self.dt,
       )
 
-    if self.phase == self.PHASE_CROSS and self._phase_time() >= self.cross_hold_time:
+    hold_time = (
+      self.descent_hold_time
+      if self.traversal_mode == "descend"
+      else self.cross_hold_time
+    )
+    if self.phase == self.PHASE_CROSS and self._phase_time() >= hold_time:
       self._set_phase(self.PHASE_LOWER)
     if self.phase == self.PHASE_LOWER:
       # Keep the cable taut while paying it out.  The same length constraint
@@ -838,8 +951,18 @@ class WireAssistWrapper:
       release_length = self.release_target_wire_length or self.initial_wire_length
       remaining = max(release_length - self.commanded_wire_length, 0.0)
       payout_speed = min(
-        self.payout_speed,
-        np.sqrt(2.0 * self.payout_acceleration * remaining),
+        self.descent_payout_speed
+        if self.traversal_mode == "descend"
+        else self.payout_speed,
+        np.sqrt(
+          2.0
+          * (
+            self.descent_payout_acceleration
+            if self.traversal_mode == "descend"
+            else self.payout_acceleration
+          )
+          * remaining
+        ),
       )
       self.commanded_wire_length = min(
         release_length,
@@ -1018,14 +1141,22 @@ class WireAssistWrapper:
       if self.lift_start_attachment_z is None:
         self.lift_start_attachment_z = float(attachment_pos[2])
       lifted_height = attachment_pos[2] - self.lift_start_attachment_z
+      posture_ready = lifted_height >= self.wide_posture_lift_height
+      if self.traversal_mode == "descend":
+        posture_ready = (
+          lifted_height >= 0.01
+          or self.tension >= 0.70 * self.robot_weight
+          or self._phase_time() >= self.wide_posture_delay + 0.5
+        )
       if (
         not self.wide_posture_ready
         and self._phase_time() >= self.wide_posture_delay
-        and lifted_height >= self.wide_posture_lift_height
+        and posture_ready
       ):
         self.wide_posture_ready = True
         print(
-          f"[WIRE] robot lifted {lifted_height:.3f}m; opening arms and legs",
+          f"[WIRE] support established (dz={lifted_height:+.3f}m); "
+          f"locking {self.traversal_mode} posture",
           flush=True,
         )
     waist_control_enabled = (
@@ -1071,15 +1202,27 @@ class WireAssistWrapper:
     transition_time = self.posture_blend_time
     action_rate_limit = None
     if self.phase == self.PHASE_LIFT and self.wide_posture_ready:
-      desired_posture_mode = "wide_lift"
-      target_posture = self.lift_posture_action
-      transition_time = self.wide_posture_blend_time
-      action_rate_limit = self.wide_posture_action_rate_limit
+      if self.traversal_mode == "descend":
+        desired_posture_mode = "descent_feet_down"
+        target_posture = self.descent_posture_action
+        transition_time = self.descent_posture_blend_time
+        action_rate_limit = self.descent_posture_action_rate_limit
+      else:
+        desired_posture_mode = "wide_lift"
+        target_posture = self.lift_posture_action
+        transition_time = self.wide_posture_blend_time
+        action_rate_limit = self.wide_posture_action_rate_limit
     elif self.phase in (self.PHASE_CROSS, self.PHASE_LOWER):
-      desired_posture_mode = "wide_lift"
-      target_posture = self.lift_posture_action
-      transition_time = self.wide_posture_blend_time
-      action_rate_limit = self.wide_posture_action_rate_limit
+      if self.traversal_mode == "descend":
+        desired_posture_mode = "descent_feet_down"
+        target_posture = self.descent_posture_action
+        transition_time = self.descent_posture_blend_time
+        action_rate_limit = self.descent_posture_action_rate_limit
+      else:
+        desired_posture_mode = "wide_lift"
+        target_posture = self.lift_posture_action
+        transition_time = self.wide_posture_blend_time
+        action_rate_limit = self.wide_posture_action_rate_limit
 
     if desired_posture_mode is not None and desired_posture_mode != self.posture_mode:
       self.posture_mode = desired_posture_mode
@@ -1149,7 +1292,12 @@ class WireAssistWrapper:
       and self.lift_posture_action is not None
     ):
       action = action.clone()
-      waist_target = self.lift_posture_action.to(
+      waist_posture = (
+        self.descent_posture_action
+        if self.traversal_mode == "descend"
+        else self.lift_posture_action
+      )
+      waist_target = waist_posture.to(
         device=action.device,
         dtype=action.dtype,
       )
@@ -1178,6 +1326,7 @@ class WireAssistWrapper:
 @dataclass(frozen=True)
 class PlayConfig:
   agent: Literal["zero", "random", "trained"] = "trained"
+  traversal_mode: Literal["ascend", "descend"] = "descend"
   checkpoint_file: str | None = None
   motion_file: str | None = None
   num_envs: int | None = None
@@ -1237,7 +1386,30 @@ def run_play(task_id: str, cfg: PlayConfig):
   reset_base = env_cfg.events.get("reset_base")
   if reset_base is not None:
     pose_range = reset_base.params.setdefault("pose_range", {})
-    pose_range.update({"x": (0.0, 0.0), "y": (0.0, 0.0), "yaw": (0.0, 0.0)})
+    if cfg.traversal_mode == "descend":
+      # Existing platform spans x=[2.0, 3.2] with top z=0.6.  Adding z=0.6
+      # to the robot's default root pose places both soles on its top surface.
+      pose_range.update(
+        {
+          "x": (2.35, 2.35),
+          "y": (0.0, 0.0),
+          "z": (0.60, 0.60),
+          "roll": (0.0, 0.0),
+          "pitch": (0.0, 0.0),
+          "yaw": (0.0, 0.0),
+        }
+      )
+    else:
+      pose_range.update(
+        {
+          "x": (0.0, 0.0),
+          "y": (0.0, 0.0),
+          "z": (0.0, 0.0),
+          "roll": (0.0, 0.0),
+          "pitch": (0.0, 0.0),
+          "yaw": (0.0, 0.0),
+        }
+      )
     reset_base.params["velocity_range"] = {}
   twist_cfg = env_cfg.commands.get("twist")
   if twist_cfg is not None and hasattr(twist_cfg, "ranges"):
@@ -1256,9 +1428,26 @@ def run_play(task_id: str, cfg: PlayConfig):
   env = ManagerBasedRlEnv(cfg=env_cfg, device=device, render_mode=render_mode)
 
   # =========================================================================
-  # 歩行ポリシーは +x へ進み、固定アンカーへの張力だけを独立制御します。
+  # Both profiles share the same state machine.  Only edge detection, cable
+  # length profile, fixed posture, spawn pose, and anchor placement differ.
   # =========================================================================
-  env = WireAssistWrapper(env, anchor_pos=(2.3, 0.0, 2.4), lin_vel_x=0.5)
+  anchor_pos = (
+    (3.35, 0.0, 2.4)
+    if cfg.traversal_mode == "descend"
+    else (2.3, 0.0, 2.4)
+  )
+  walk_speed = 0.35 if cfg.traversal_mode == "descend" else 0.5
+  print(
+    f"[WIRE] traversal_mode={cfg.traversal_mode} "
+    f"anchor={anchor_pos} walk_speed={walk_speed:.2f}m/s",
+    flush=True,
+  )
+  env = WireAssistWrapper(
+    env,
+    traversal_mode=cfg.traversal_mode,
+    anchor_pos=anchor_pos,
+    lin_vel_x=walk_speed,
+  )
   
   if TRAINED_MODE and cfg.video:
     env = VideoRecorder(env, video_folder=log_dir / "videos" / "play", step_trigger=lambda step: step == 0, video_length=cfg.video_length, disable_logger=True)
