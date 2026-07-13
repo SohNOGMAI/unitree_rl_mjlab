@@ -55,14 +55,14 @@ class WireAssistWrapper:
   def __init__(
     self,
     env,
-    anchor_pos=(2.3, 0.0, 2.4),
+    anchor_pos=(2.5, 0.0, 2.4),
     attachment_pos_b=(-0.14, 0.0, 0.40),
     obstacle_body_names=("obstacle_box", "obstacle", "wall_front"),
     lin_vel_x=1.0,
     heading_kp=0.0,
     max_yaw_rate=0.0,
     turn_in_place_threshold=np.deg2rad(8.0),
-    approach_distance=0.30,
+    approach_distance=0.35,
     clearance=0.10,
     lift_kp=50.0,
     lift_kd=90.0,
@@ -71,16 +71,18 @@ class WireAssistWrapper:
     max_tension=40.0 * 9.80665,
     tension_rate=1200.0,
     tension_release_rate=200.0,
-    reel_in_speed=0.10,
-    payout_speed=0.10,
+    reel_in_speed=0.05,
+    payout_speed=0.5,
     max_reel_in=1.00,
-    hoist_target_wire_length=0.55,
-    release_target_wire_length=0.85,
+    hoist_target_wire_length=0.58,
+    release_target_wire_length=0.90,
     winch_kp=1500.0,
+
     winch_kd=120.0,
     constraint_kp=500.0,
     constraint_kd=350.0,
     wire_acceleration=0.025,
+    payout_acceleration=0.10,
     wire_rate_filter_alpha=0.15,
     hold_length_tolerance=0.025,
     hold_rate_tolerance=0.06,
@@ -101,19 +103,21 @@ class WireAssistWrapper:
     lift_detect_velocity=0.03,
     lift_detect_height=0.02,
     lift_detect_tension=300.0,
-    wide_posture_delay=1.0,
-    wide_posture_lift_height=0.10,
+    wide_posture_delay=0.5,
+    wide_posture_lift_height=0.02,
     brace_start_time=0.5,
     brace_blend_time=2.0,
+    brace_action_rate_limit=0.80,
     wide_posture_blend_time=4.0,
-    wide_posture_action_rate_limit=0.6,
-    down_posture_blend_time=2.0,
-    posture_blend_time=2.0,
-    landing_posture_blend_time=1.0,
-    post_release_settle_time=1.5,
-    policy_resume_blend_time=1.5,
-    assisted_policy_hold_time=3.0,
-    walk_resume_ramp_time=2.0,
+    wide_posture_action_rate_limit=0.35,
+    down_posture_blend_time=3.0,
+    down_posture_action_rate_limit=0.30,
+    posture_blend_time=0.5,
+    landing_posture_blend_time=0.5,
+    post_release_settle_time=0.5,
+    policy_resume_blend_time=0.8,
+    assisted_policy_hold_time=1.2,
+    walk_resume_ramp_time=1.0,
     posture_action_limit=2.0,
     policy_action_filter_alpha=0.08,
     pre_lift_stand_time=1.0,
@@ -152,6 +156,7 @@ class WireAssistWrapper:
     self.constraint_kp = constraint_kp
     self.constraint_kd = constraint_kd
     self.wire_acceleration = wire_acceleration
+    self.payout_acceleration = payout_acceleration
     self.wire_rate_filter_alpha = wire_rate_filter_alpha
     self.hold_length_tolerance = hold_length_tolerance
     self.hold_rate_tolerance = hold_rate_tolerance
@@ -176,9 +181,11 @@ class WireAssistWrapper:
     self.wide_posture_lift_height = wide_posture_lift_height
     self.brace_start_time = brace_start_time
     self.brace_blend_time = brace_blend_time
+    self.brace_action_rate_limit = brace_action_rate_limit
     self.wide_posture_blend_time = wide_posture_blend_time
     self.wide_posture_action_rate_limit = wide_posture_action_rate_limit
     self.down_posture_blend_time = down_posture_blend_time
+    self.down_posture_action_rate_limit = down_posture_action_rate_limit
     self.posture_blend_time = posture_blend_time
     self.landing_posture_blend_time = landing_posture_blend_time
     self.post_release_settle_time = post_release_settle_time
@@ -323,6 +330,7 @@ class WireAssistWrapper:
     self.lift_start_attachment_z = None
     self.wide_posture_ready = False
     self.brace_start_action = None
+    self.brace_start_step = None
     self.step_counter = 0
     self.last_log_step = -1
 
@@ -366,14 +374,14 @@ class WireAssistWrapper:
     """Wide posture: high yaw inertia and a broad front contact envelope."""
     return self._build_posture_action(
       {
-        "left_hip_pitch_joint": 0.0,
-        "right_hip_pitch_joint": 0.0,
-        "left_hip_roll_joint": 0.35,
-        "right_hip_roll_joint": -0.35,
-        "left_knee_joint": 0.35,
-        "right_knee_joint": 0.35,
-        "left_ankle_pitch_joint": -0.15,
-        "right_ankle_pitch_joint": -0.15,
+        "left_hip_pitch_joint": -0.0,
+        "right_hip_pitch_joint": -0.0,
+        "left_hip_roll_joint": 0.40,
+        "right_hip_roll_joint": -0.40,
+        "left_knee_joint": 0.55,
+        "right_knee_joint": 0.55,
+        "left_ankle_pitch_joint": -0.35,
+        "right_ankle_pitch_joint": -0.35,
         "left_ankle_roll_joint": -0.26,
         "right_ankle_roll_joint": 0.26,
         "waist_yaw_joint": 0.0,
@@ -415,7 +423,7 @@ class WireAssistWrapper:
     )
 
   def _build_brace_posture_action(self):
-    """Arms diagonally forward to brace lightly against the platform edge."""
+    """Put both arms diagonally forward before hoisting starts."""
     return self._build_posture_action(
       {
         "left_shoulder_pitch_joint": -0.50,
@@ -431,19 +439,19 @@ class WireAssistWrapper:
     """Keep the wide stance but move both soles forward of the COM."""
     return self._build_posture_action(
       {
-        "left_hip_pitch_joint": -0.50,
-        "right_hip_pitch_joint": -0.50,
-        "left_hip_roll_joint": 0.30,
-        "right_hip_roll_joint": -0.30,
-        "left_knee_joint": 0.70,
-        "right_knee_joint": 0.70,
+        "left_hip_pitch_joint": -0.40,
+        "right_hip_pitch_joint": -0.40,
+        "left_hip_roll_joint": 0.40,
+        "right_hip_roll_joint": -0.40,
+        "left_knee_joint": 0.75,
+        "right_knee_joint": 0.75,
         "left_ankle_pitch_joint": -0.40,
         "right_ankle_pitch_joint": -0.40,
         "left_ankle_roll_joint": -0.26,
         "right_ankle_roll_joint": 0.26,
         "waist_yaw_joint": 0.0,
         "waist_roll_joint": 0.0,
-        "waist_pitch_joint": 0.25,
+        "waist_pitch_joint": 0.12,
         "left_shoulder_pitch_joint": 0.50,
         "right_shoulder_pitch_joint": 0.50,
         "left_shoulder_roll_joint": 1.50,
@@ -481,6 +489,20 @@ class WireAssistWrapper:
     return torch.clamp(
       posture, -self.posture_action_limit, self.posture_action_limit
     )
+
+  def _rate_limit_action(self, target, previous, rate_limit, indices=None):
+    """Limit normalized joint-action motion to ``rate_limit`` per second."""
+    if previous is None or rate_limit is None or rate_limit <= 0.0:
+      return target
+    previous = previous.to(device=target.device, dtype=target.dtype)
+    max_delta = float(rate_limit) * self.dt
+    if indices is None:
+      return previous + torch.clamp(target - previous, -max_delta, max_delta)
+    limited = target.clone()
+    limited[:, indices] = previous[:, indices] + torch.clamp(
+      target[:, indices] - previous[:, indices], -max_delta, max_delta
+    )
+    return limited
 
   def _first_box_geom(self, body_id):
     for geom_id in range(self.native_model.ngeom):
@@ -611,7 +633,11 @@ class WireAssistWrapper:
 
     if self.phase == self.PHASE_APPROACH and x >= box_front - self.approach_distance:
       self._set_phase(self.PHASE_SETTLE)
-    if self.phase == self.PHASE_SETTLE and self._phase_time() >= self.settle_time:
+    pre_lift_time = max(
+      self.settle_time,
+      self.brace_start_time + self.brace_blend_time,
+    )
+    if self.phase == self.PHASE_SETTLE and self._phase_time() >= pre_lift_time:
       self._set_phase(self.PHASE_LIFT)
     if self.phase == self.PHASE_LIFT:
       lifted_over_box = attachment_pos[2] >= target_z and x >= box_front
@@ -782,7 +808,11 @@ class WireAssistWrapper:
       if self.configured_release_target_wire_length is None:
         self.release_target_wire_length = actual_length
 
-    if self.phase == self.PHASE_SETTLE and self._phase_time() >= self.settle_time:
+    pre_lift_time = max(
+      self.settle_time,
+      self.brace_start_time + self.brace_blend_time,
+    )
+    if self.phase == self.PHASE_SETTLE and self._phase_time() >= pre_lift_time:
       self._set_phase(self.PHASE_LIFT)
 
     if self.phase == self.PHASE_LIFT:
@@ -809,7 +839,7 @@ class WireAssistWrapper:
       remaining = max(release_length - self.commanded_wire_length, 0.0)
       payout_speed = min(
         self.payout_speed,
-        np.sqrt(2.0 * self.wire_acceleration * remaining),
+        np.sqrt(2.0 * self.payout_acceleration * remaining),
       )
       self.commanded_wire_length = min(
         release_length,
@@ -905,6 +935,7 @@ class WireAssistWrapper:
       f"{self.waist_torques['pitch']:+.1f},"
       f"{self.waist_torques['roll']:+.1f})Nm "
       f"waist_lock={'ON' if self.waist_lock_active else 'OFF'} "
+      f"posture={self.posture_mode or 'policy'} "
       f"lift_dz={attachment_pos[2] - self.lift_start_attachment_z if self.lift_start_attachment_z is not None else 0.0:+.3f}m "
       f"wide={'ON' if self.wide_posture_ready else 'OFF'} "
       f"torso_rel_rpy=({np.rad2deg(self.torso_relative_rpy[0]):+.1f},"
@@ -1038,12 +1069,17 @@ class WireAssistWrapper:
     desired_posture_mode = None
     target_posture = None
     transition_time = self.posture_blend_time
+    action_rate_limit = None
     if self.phase == self.PHASE_LIFT and self.wide_posture_ready:
       desired_posture_mode = "wide_lift"
       target_posture = self.lift_posture_action
+      transition_time = self.wide_posture_blend_time
+      action_rate_limit = self.wide_posture_action_rate_limit
     elif self.phase in (self.PHASE_CROSS, self.PHASE_LOWER):
       desired_posture_mode = "wide_lift"
       target_posture = self.lift_posture_action
+      transition_time = self.wide_posture_blend_time
+      action_rate_limit = self.wide_posture_action_rate_limit
 
     if desired_posture_mode is not None and desired_posture_mode != self.posture_mode:
       self.posture_mode = desired_posture_mode
@@ -1073,6 +1109,9 @@ class WireAssistWrapper:
         else torch.zeros_like(action)
       )
       action = (1.0 - blend) * self.posture_lock_start_action + blend * target_action
+      action = self._rate_limit_action(
+        action, self.last_applied_action, action_rate_limit
+      )
     elif self.phase == self.PHASE_ASSIST:
       if self.posture_mode != "assist_policy_blend":
         self.posture_mode = "assist_policy_blend"
