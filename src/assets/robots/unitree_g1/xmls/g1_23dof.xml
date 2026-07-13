@@ -218,7 +218,7 @@
       <geom type="box" size="0.6 1.0 0.3" rgba="0.8 0.4 0.2 1" group="0" contype="0" conaffinity="0"/>
       <geom type="box" size="0.6 1.0 0.3" rgba="0.8 0.4 0.2 0" group="3" contype="15" conaffinity="15" condim="3" friction="1.5 0.005 0.0001"/>
     </body>
-    <body name="anchor_visual" pos="3.32 0 2.4">
+    <body name="anchor_visual" pos="3.35 0 2.4">
             <geom type="sphere" size="0.06" rgba="0.2 0.9 0.2 0.8" group="0" contype="0" conaffinity="0" />
             <site name="wire_anchor" pos="0 0 0" size="0.001" rgba="0 0 0 0" />
     </body>
