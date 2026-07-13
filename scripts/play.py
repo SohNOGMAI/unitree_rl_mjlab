@@ -62,7 +62,7 @@ class WireAssistWrapper:
     heading_kp=0.0,
     max_yaw_rate=0.0,
     turn_in_place_threshold=np.deg2rad(8.0),
-    approach_distance=0.35,
+    approach_distance=1.5,
     clearance=0.10,
     lift_kp=50.0,
     lift_kd=90.0,
