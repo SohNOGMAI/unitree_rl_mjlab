@@ -63,17 +63,17 @@ class WireAssistWrapper:
     heading_kp=0.0,
     max_yaw_rate=0.0,
     turn_in_place_threshold=np.deg2rad(8.0),
-    approach_distance=0.35,
+    approach_distance=0.40,
     clearance=0.10,
     lift_kp=50.0,
     lift_kd=90.0,
     pitch_kp=70.0,
     lift_support_ratio=1.25,
-    max_tension=40.0 * 9.80665,
+    max_tension=48.0 * 9.80665,
     tension_rate=1200.0,
     tension_release_rate=200.0,
     reel_in_speed=0.05,
-    payout_speed=0.5,
+    payout_speed=0.3,
     max_reel_in=1.00,
     hoist_target_wire_length=0.58,
     release_target_wire_length=0.90,
@@ -84,16 +84,16 @@ class WireAssistWrapper:
     constraint_kd=350.0,
     wire_acceleration=0.025,
     payout_acceleration=0.10,
-    descent_approach_distance=0.72,
-    descent_preload_reel_in=0.12, # Preload the wire by this amount before descent to reduce slack and avoid snagging.
+    descent_approach_distance=0.35,
+    descent_preload_reel_in=0.05, # Preload the wire by this amount before descent to reduce slack and avoid snagging.
     descent_release_wire_length=None,
     descent_landing_length_margin=0.15,
-    descent_reel_in_speed=0.030,
-    descent_payout_speed=0.10,
+    descent_reel_in_speed=0.05,
+    descent_payout_speed=1.00,
     descent_payout_acceleration=0.04,
-    descent_hold_time=0.5,
-    descent_posture_blend_time=2.5,
-    descent_posture_action_rate_limit=0.40,
+    descent_hold_time=0.1,
+    descent_posture_blend_time=2.0,
+    descent_posture_action_rate_limit=2.50,
     wire_rate_filter_alpha=0.15,
     hold_length_tolerance=0.025,
     hold_rate_tolerance=0.06,
@@ -111,11 +111,7 @@ class WireAssistWrapper:
     pitch_hard_limit=np.deg2rad(22.0),
     pitch_payout_speed=0.45,
     lock_posture_during_lift=False,
-    lift_detect_velocity=0.03,
-    lift_detect_height=0.02,
-    lift_detect_tension=300.0,
-    wide_posture_delay=0.5,
-    wide_posture_lift_height=0.02,
+    posture_lock_reel_in_length=0.010,
     brace_start_time=0.5,
     brace_blend_time=2.0,
     brace_action_rate_limit=0.80,
@@ -203,11 +199,7 @@ class WireAssistWrapper:
     self.pitch_hard_limit = pitch_hard_limit
     self.pitch_payout_speed = pitch_payout_speed
     self.lock_posture_during_lift = lock_posture_during_lift
-    self.lift_detect_velocity = lift_detect_velocity
-    self.lift_detect_height = lift_detect_height
-    self.lift_detect_tension = lift_detect_tension
-    self.wide_posture_delay = wide_posture_delay
-    self.wide_posture_lift_height = wide_posture_lift_height
+    self.posture_lock_reel_in_length = posture_lock_reel_in_length
     self.brace_start_time = brace_start_time
     self.brace_blend_time = brace_blend_time
     self.brace_action_rate_limit = brace_action_rate_limit
@@ -359,7 +351,7 @@ class WireAssistWrapper:
     self.waist_torques = {axis: 0.0 for axis in ("yaw", "roll", "pitch")}
     self.torso_relative_rpy = np.zeros(3, dtype=np.float64)
     self.waist_lock_active = False
-    self.lift_start_attachment_z = None
+    self.lift_start_wire_length = None
     self.wide_posture_ready = False
     self.brace_start_action = None
     self.brace_start_step = None
@@ -459,31 +451,31 @@ class WireAssistWrapper:
     )
 
   def _build_descent_posture_action(self):
-    """Feet-down suspension posture for a controlled step descent.
+    """Forward-feet suspension posture for clearing the platform edge.
 
-    The legs remain mildly abducted for lateral stability, while hip/knee/ankle
-    flexion keeps both soles below the pelvis and ready to accept ground load.
-    The arms increase yaw inertia without becoming the primary contact point.
+    Unlike the ascent posture, the feet are placed forward of the pelvis and
+    the lateral opening is kept modest.  This reduces the swept area of either
+    foot during residual yaw and keeps the platform corner behind the soles.
     """
     return self._build_posture_action(
       {
-        "left_hip_pitch_joint": -0.12,
-        "right_hip_pitch_joint": -0.12,
-        "left_hip_roll_joint": 0.26,
-        "right_hip_roll_joint": -0.26,
-        "left_knee_joint": 0.45,
-        "right_knee_joint": 0.45,
-        "left_ankle_pitch_joint": -0.28,
-        "right_ankle_pitch_joint": -0.28,
-        "left_ankle_roll_joint": -0.16,
-        "right_ankle_roll_joint": 0.16,
+        "left_hip_pitch_joint": -0.0,
+        "right_hip_pitch_joint": -0.0,
+        "left_hip_roll_joint": 0.30,
+        "right_hip_roll_joint": -0.30,
+        "left_knee_joint": 0.00,
+        "right_knee_joint": 0.00,
+        "left_ankle_pitch_joint": 1.0,
+        "right_ankle_pitch_joint": 1.0,
+        "left_ankle_roll_joint": -0.05,
+        "right_ankle_roll_joint": 0.05,
         "waist_yaw_joint": 0.0,
         "waist_roll_joint": 0.0,
-        "waist_pitch_joint": 0.0,
-        "left_shoulder_pitch_joint": 0.35,
-        "right_shoulder_pitch_joint": 0.35,
-        "left_shoulder_roll_joint": 1.10,
-        "right_shoulder_roll_joint": -1.10,
+        "waist_pitch_joint": 0.4,
+        "left_shoulder_pitch_joint": 0.8,
+        "right_shoulder_pitch_joint": 0.8,
+        "left_shoulder_roll_joint": 2.35,
+        "right_shoulder_roll_joint": -2.35,
         "left_elbow_joint": 0.50,
         "right_elbow_joint": 0.50,
       }
@@ -493,14 +485,14 @@ class WireAssistWrapper:
     """Feet-down, slightly crouched posture held through touchdown."""
     return self._build_posture_action(
       {
-        "left_hip_pitch_joint": -0.25,
-        "right_hip_pitch_joint": -0.25,
+        "left_hip_pitch_joint": -0.70,
+        "right_hip_pitch_joint": -0.70,
         "left_hip_roll_joint": 0.08,
         "right_hip_roll_joint": -0.08,
         "left_knee_joint": 0.55,
         "right_knee_joint": 0.55,
-        "left_ankle_pitch_joint": -0.30,
-        "right_ankle_pitch_joint": -0.30,
+        "left_ankle_pitch_joint": -0.20,
+        "right_ankle_pitch_joint": -0.20,
         "left_ankle_roll_joint": 0.0,
         "right_ankle_roll_joint": 0.0,
         "waist_yaw_joint": 0.0,
@@ -968,6 +960,19 @@ class WireAssistWrapper:
       self.brace_start_time + self.brace_blend_time,
     )
     if self.phase == self.PHASE_SETTLE and self._phase_time() >= pre_lift_time:
+      # SETTLE中の微小な姿勢変化で古くなった長さを使わないよう、
+      # LIFT開始時の実ワイヤー長を基準に巻取り目標を再設定する。
+      self.initial_wire_length = actual_length
+      self.commanded_wire_length = actual_length
+      self.lift_start_wire_length = actual_length
+      if self.traversal_mode == "descend":
+        self._configure_descent_wire_targets(
+          attachment_pos,
+          actual_length,
+          box_bottom,
+          box_top,
+          announce=True,
+        )
       self._set_phase(self.PHASE_LIFT)
 
     if self.phase == self.PHASE_LIFT:
@@ -1113,7 +1118,7 @@ class WireAssistWrapper:
       f"{self.waist_torques['roll']:+.1f})Nm "
       f"waist_lock={'ON' if self.waist_lock_active else 'OFF'} "
       f"posture={self.posture_mode or 'policy'} "
-      f"lift_dz={attachment_pos[2] - self.lift_start_attachment_z if self.lift_start_attachment_z is not None else 0.0:+.3f}m "
+      f"Lreel={self.lift_start_wire_length - self.commanded_wire_length if self.lift_start_wire_length is not None and self.commanded_wire_length is not None else 0.0:+.3f}m "
       f"wide={'ON' if self.wide_posture_ready else 'OFF'} "
       f"torso_rel_rpy=({np.rad2deg(self.torso_relative_rpy[0]):+.1f},"
       f"{np.rad2deg(self.torso_relative_rpy[1]):+.1f},"
@@ -1161,7 +1166,7 @@ class WireAssistWrapper:
     self.waist_torques = {axis: 0.0 for axis in ("yaw", "roll", "pitch")}
     self.torso_relative_rpy = np.zeros(3, dtype=np.float64)
     self.waist_lock_active = False
-    self.lift_start_attachment_z = None
+    self.lift_start_wire_length = None
     self.wide_posture_ready = False
     self.brace_start_action = None
     self.last_log_step = -1
@@ -1192,23 +1197,21 @@ class WireAssistWrapper:
     desired = self._inextensible_cable_tension(attachment_pos) if heading_aligned else 0.0
     self._apply_cable_force(body_com, attachment_pos, desired)
     if self.phase == self.PHASE_LIFT:
-      if self.lift_start_attachment_z is None:
-        self.lift_start_attachment_z = float(attachment_pos[2])
-      lifted_height = attachment_pos[2] - self.lift_start_attachment_z
-      required_lift_height = (
-        0.01
-        if self.traversal_mode == "descend"
-        else self.wide_posture_lift_height
+      if self.lift_start_wire_length is None:
+        self.lift_start_wire_length = float(self.commanded_wire_length)
+      reel_in_length = max(
+        self.lift_start_wire_length - float(self.commanded_wire_length),
+        0.0,
       )
-      posture_ready = lifted_height >= required_lift_height
+      posture_ready = reel_in_length >= self.posture_lock_reel_in_length
       if (
         not self.wide_posture_ready
-        and self._phase_time() >= self.wide_posture_delay
         and posture_ready
       ):
         self.wide_posture_ready = True
         print(
-          f"[WIRE] support established (dz={lifted_height:+.3f}m); "
+          f"[WIRE] support established "
+          f"(reel_in={reel_in_length:.3f}m); "
           f"locking {self.traversal_mode} posture",
           flush=True,
         )
@@ -1488,7 +1491,7 @@ def run_play(task_id: str, cfg: PlayConfig):
   # length profile, fixed posture, spawn pose, and anchor placement differ.
   # =========================================================================
   anchor_pos = (
-    (3.35, 0.0, 2.4)
+    (3.45, 0.0, 2.4)
     if cfg.traversal_mode == "descend"
     else (2.3, 0.0, 2.4)
   )
