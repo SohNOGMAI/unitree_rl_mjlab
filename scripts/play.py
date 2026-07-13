@@ -13,6 +13,10 @@ import mujoco as mj
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 
+from src.tasks.crouch.config.g1.env_cfgs import (
+  CROUCH_MAX_DEPTH,
+  CROUCH_TARGET_29DOF,
+)
 from mjlab.envs import ManagerBasedRlEnv
 from mjlab.rl import MjlabOnPolicyRunner, RslRlVecEnvWrapper
 from mjlab.tasks.registry import list_tasks, load_env_cfg, load_rl_cfg, load_runner_cls
@@ -60,6 +64,8 @@ class WireAssistWrapper:
     attachment_pos_b=(-0.14, 0.0, 0.40),
     obstacle_body_names=("obstacle_box", "obstacle", "wall_front"),
     lin_vel_x=1.0,
+    lateral_position_kp=0.8,
+    max_lateral_speed=0.25,
     heading_kp=0.0,
     max_yaw_rate=0.0,
     turn_in_place_threshold=np.deg2rad(8.0),
@@ -94,18 +100,24 @@ class WireAssistWrapper:
     descent_hold_time=0.1,
     descent_posture_blend_time=2.0,
     descent_posture_action_rate_limit=2.50,
-    gap_approach_distance=0.50,
-    gap_hoist_wire_length=0.55,
-    gap_release_wire_length=0.62,
+    gap_approach_distance=0.75,
+    gap_hoist_wire_length=None,
+    gap_release_wire_length=None,
+    gap_hoist_clearance=0.20,
+    gap_landing_length_margin=0.02,
     gap_reel_in_speed=0.12,
+    gap_lift_preload_time=1.5,
+    gap_lift_tension_rate=250.0,
     gap_payout_speed=0.20,
     gap_payout_acceleration=0.05,
     gap_hold_time=0.5,
     gap_posture_blend_time=1.5,
     gap_posture_action_rate_limit=0.80,
     gap_crouch_wait_time=2.0,
-    gap_crouch_blend_time=3.0,
+    gap_policy_handover_time=1.0,
+    gap_crouch_blend_time=8.0,
     gap_crouch_settle_time=1.0,
+    gap_crouch_depth=CROUCH_MAX_DEPTH,
     gap_crouch_action_rate_limit=0.25,
     gap_crouch_wire_length=3.15,
     gap_crouch_wire_speed=0.015,
@@ -114,6 +126,8 @@ class WireAssistWrapper:
     gap_crouch_max_tension=200.0,
     gap_crouch_max_horizontal_force=10.0,
     gap_crouch_tension_rate=100.0,
+    cable_taut_transition=0.015,
+    external_crouch_policy=False,
     wire_rate_filter_alpha=0.15,
     hold_length_tolerance=0.025,
     hold_rate_tolerance=0.06,
@@ -169,6 +183,8 @@ class WireAssistWrapper:
       self.anchor_pos = np.array([self.anchor_pos[0], 0.0, self.anchor_pos[1]])
     self.attachment_pos_b = np.asarray(attachment_pos_b, dtype=np.float64)
     self.lin_vel_x = lin_vel_x
+    self.lateral_position_kp = lateral_position_kp
+    self.max_lateral_speed = max_lateral_speed
     self.heading_kp = heading_kp
     self.max_yaw_rate = max_yaw_rate
     self.turn_in_place_threshold = turn_in_place_threshold
@@ -205,15 +221,23 @@ class WireAssistWrapper:
     self.gap_approach_distance = gap_approach_distance
     self.gap_hoist_wire_length = gap_hoist_wire_length
     self.gap_release_wire_length = gap_release_wire_length
+    self.gap_hoist_clearance = gap_hoist_clearance
+    self.gap_landing_length_margin = gap_landing_length_margin
     self.gap_reel_in_speed = gap_reel_in_speed
+    self.gap_lift_preload_time = gap_lift_preload_time
+    self.gap_lift_tension_rate = gap_lift_tension_rate
     self.gap_payout_speed = gap_payout_speed
     self.gap_payout_acceleration = gap_payout_acceleration
     self.gap_hold_time = gap_hold_time
     self.gap_posture_blend_time = gap_posture_blend_time
     self.gap_posture_action_rate_limit = gap_posture_action_rate_limit
     self.gap_crouch_wait_time = gap_crouch_wait_time
+    self.gap_policy_handover_time = gap_policy_handover_time
     self.gap_crouch_blend_time = gap_crouch_blend_time
     self.gap_crouch_settle_time = gap_crouch_settle_time
+    self.gap_crouch_depth = float(
+      np.clip(gap_crouch_depth, 0.0, CROUCH_MAX_DEPTH)
+    )
     self.gap_crouch_action_rate_limit = gap_crouch_action_rate_limit
     self.gap_crouch_wire_length = gap_crouch_wire_length
     self.gap_crouch_wire_speed = gap_crouch_wire_speed
@@ -224,6 +248,8 @@ class WireAssistWrapper:
       gap_crouch_max_horizontal_force
     )
     self.gap_crouch_tension_rate = gap_crouch_tension_rate
+    self.cable_taut_transition = cable_taut_transition
+    self.external_crouch_policy = external_crouch_policy
     self.wire_rate_filter_alpha = wire_rate_filter_alpha
     self.hold_length_tolerance = hold_length_tolerance
     self.hold_rate_tolerance = hold_rate_tolerance
@@ -407,6 +433,8 @@ class WireAssistWrapper:
     self.last_applied_action = None
     self.gap_crouch_target_action = None
     self.gap_crouch_command_target = None
+    self.external_crouch_blend = 0.0
+    self.external_crouch_depth = 0.0
     self.gap_nominal_hoist_reel_in = None
     self.gap_nominal_payout = None
     self.release_ready_step = None
@@ -714,8 +742,20 @@ class WireAssistWrapper:
   def _wrap_to_pi(angle):
     return (angle + np.pi) % (2.0 * np.pi) - np.pi
 
-  def _set_walking_command(self, yaw=None, allow_forward=True, forward_scale=1.0):
-    """Command forward motion only; active yaw control is disabled."""
+  def _set_walking_command(
+    self,
+    yaw=None,
+    lateral_position=None,
+    allow_forward=True,
+    forward_scale=1.0,
+  ):
+    """Track the +x path without applying a yaw command.
+
+    The velocity policy uses body-frame commands.  A small body-frame lateral
+    command is therefore computed from the world-frame y error while walking.
+    This keeps the robot below the fixed anchor plane without reintroducing the
+    aggressive yaw controller that previously excited the upper body.
+    """
     command_manager = getattr(self.env.unwrapped, "command_manager", None)
     if command_manager is None:
       return False
@@ -723,12 +763,27 @@ class WireAssistWrapper:
       command = command_manager.get_command("twist")
       self.heading_aligned = True
       self.heading_error = 0.0
+      forward_world = (
+        self.lin_vel_x * float(np.clip(forward_scale, 0.0, 1.0))
+        if allow_forward
+        else 0.0
+      )
+      lateral_world = 0.0
+      if allow_forward and lateral_position is not None:
+        lateral_world = float(
+          np.clip(
+            self.lateral_position_kp
+            * (self.anchor_pos[1] - float(lateral_position)),
+            -self.max_lateral_speed,
+            self.max_lateral_speed,
+          )
+        )
+      heading = float(yaw or 0.0)
+      c, s = np.cos(heading), np.sin(heading)
       target = torch.tensor(
         [
-          self.lin_vel_x * float(np.clip(forward_scale, 0.0, 1.0))
-          if allow_forward
-          else 0.0,
-          0.0,
+          c * forward_world + s * lateral_world,
+          -s * forward_world + c * lateral_world,
           0.0,
         ],
         device=command.device,
@@ -803,6 +858,59 @@ class WireAssistWrapper:
 
   def _phase_time(self):
     return (self.step_counter - self.phase_start_step) * self.dt
+
+  def crouch_policy_schedule(self):
+    """Return walking/crouch blend and normalized crouch-depth commands."""
+    if (
+      self.external_crouch_policy
+      and self.traversal_mode == "gap"
+      and self.phase == self.PHASE_LIFT
+      and not self.wide_posture_ready
+    ):
+      # Keep closed-loop balance control until the winch encoder confirms that
+      # enough cable has been reeled in to support the robot.  No world-frame
+      # height measurement is needed for this handover.
+      self.external_crouch_blend = 1.0
+      self.external_crouch_depth = self.gap_crouch_depth
+      return 1.0, self.gap_crouch_depth
+    if (
+      not self.external_crouch_policy
+      or self.traversal_mode != "gap"
+      or self.phase != self.PHASE_SETTLE
+    ):
+      self.external_crouch_blend = 0.0
+      self.external_crouch_depth = 0.0
+      return 0.0, 0.0
+
+    phase_time = self._phase_time()
+    handover_start = self.gap_crouch_wait_time
+    crouch_start = handover_start + self.gap_policy_handover_time
+    if phase_time < handover_start:
+      blend = 0.0
+      depth = 0.0
+    elif phase_time < crouch_start:
+      u = np.clip(
+        (phase_time - handover_start)
+        / max(self.gap_policy_handover_time, self.dt),
+        0.0,
+        1.0,
+      )
+      # Zero endpoint slopes prevent a step in action velocity at handover.
+      blend = float(u * u * (3.0 - 2.0 * u))
+      depth = 0.0
+    else:
+      blend = 1.0
+      depth = self.gap_crouch_depth * float(
+        np.clip(
+          (phase_time - crouch_start)
+          / max(self.gap_crouch_blend_time, self.dt),
+          0.0,
+          1.0,
+        )
+      )
+    self.external_crouch_blend = blend
+    self.external_crouch_depth = depth
+    return blend, depth
 
   def _legacy_desired_tension_unused(
     self, robot_com, body_com, attachment_pos, pitch, vz
@@ -923,6 +1031,11 @@ class WireAssistWrapper:
     # Only the final RELEASE uses the deliberately gentle force ramp-down.
     if self.phase == self.PHASE_SETTLE and self.traversal_mode == "gap":
       rate_limit = self.gap_crouch_tension_rate
+    elif self.phase == self.PHASE_LIFT and self.traversal_mode == "gap":
+      # A far-side anchor has a large horizontal force component.  Bringing
+      # the cable load up slowly avoids an impulse that pitches and yaws the
+      # suspended robot before its fixed posture can react.
+      rate_limit = self.gap_lift_tension_rate
     elif self.phase == self.PHASE_RELEASE and limited_target < self.tension:
       rate_limit = self.tension_release_rate
     else:
@@ -1002,41 +1115,71 @@ class WireAssistWrapper:
       )
 
   def _configure_gap_wire_targets(
-    self, actual_length, announce=False, from_crouch=False
+    self,
+    attachment_pos,
+    actual_length,
+    box_top,
+    announce=False,
+    from_crouch=False,
   ):
-    """Preserve the original gap reel-in/out amounts around a crouched start."""
-    if not from_crouch or self.gap_nominal_hoist_reel_in is None:
-      nominal_target = max(
-        min(self.gap_hoist_wire_length, actual_length),
-        0.05,
-      )
-      self.gap_nominal_hoist_reel_in = max(
-        actual_length - nominal_target,
-        0.0,
-      )
-      self.gap_nominal_payout = max(
-        self.gap_release_wire_length - nominal_target,
-        0.0,
-      )
-      self.target_wire_length = nominal_target
-    else:
-      # The crouch changes the back attachment height.  Use its completed
-      # cable length as the new datum, but keep exactly the same reel travel as
-      # the former standing-start gap sequence.
-      self.target_wire_length = max(
-        actual_length - self.gap_nominal_hoist_reel_in,
-        0.05,
-      )
+    """Compute gap lengths from the measured support posture and geometry.
+
+    When the attachment is vertically below the ceiling anchor, its cable
+    length equals the vertical separation.  The current attachment height
+    above the take-off platform is also the height needed for the feet to
+    touch the equal-height landing platform.  This gives a measurable landing
+    length without relying on foot positions.  Hoisting shortens that length
+    only by the requested clearance.
+
+    Explicit ``gap_*_wire_length`` values remain available as experimental
+    overrides, but the geometry-derived profile is the safe default.
+    """
+    attachment_height = max(float(attachment_pos[2] - box_top), 0.05)
+    landing_attachment_z = (
+      box_top + attachment_height - self.gap_landing_length_margin
+    )
+    computed_landing_length = max(
+      float(self.anchor_pos[2] - landing_attachment_z),
+      0.05,
+    )
+    computed_hoist_length = max(
+      computed_landing_length - self.gap_hoist_clearance,
+      0.05,
+    )
+    requested_hoist = (
+      computed_hoist_length
+      if self.gap_hoist_wire_length is None
+      else float(self.gap_hoist_wire_length)
+    )
+    requested_landing = (
+      computed_landing_length
+      if self.gap_release_wire_length is None
+      else float(self.gap_release_wire_length)
+    )
+    self.target_wire_length = max(
+      min(requested_hoist, actual_length),
+      0.05,
+    )
     self.release_target_wire_length = max(
-      self.target_wire_length + (self.gap_nominal_payout or 0.0),
+      requested_landing,
       self.target_wire_length,
+    )
+    self.gap_nominal_hoist_reel_in = max(
+      actual_length - self.target_wire_length,
+      0.0,
+    )
+    self.gap_nominal_payout = max(
+      self.release_target_wire_length - self.target_wire_length,
+      0.0,
     )
     if announce:
       print(
-        "[WIRE] gap profile armed: "
+        "[WIRE] gap profile armed"
+        f" ({'crouched' if from_crouch else 'standing'} geometry): "
         f"Lstart={actual_length:.3f}m "
         f"Lhoist={self.target_wire_length:.3f}m "
         f"Llanding={self.release_target_wire_length:.3f}m "
+        f"h_attach={attachment_height:.3f}m "
         f"reel={self.gap_nominal_hoist_reel_in:.3f}m "
         f"payout={self.gap_nominal_payout:.3f}m",
         flush=True,
@@ -1114,7 +1257,9 @@ class WireAssistWrapper:
           )
         elif self.traversal_mode == "gap":
           self._configure_gap_wire_targets(
+            attachment_pos,
             self.initial_wire_length,
+            box_top,
             announce=True,
           )
         else:
@@ -1178,6 +1323,11 @@ class WireAssistWrapper:
 
     pre_lift_time = (
       self.gap_crouch_wait_time
+      + (
+        self.gap_policy_handover_time
+        if self.external_crouch_policy
+        else 0.0
+      )
       + self.gap_crouch_blend_time
       + self.gap_crouch_settle_time
       if self.traversal_mode == "gap"
@@ -1200,11 +1350,10 @@ class WireAssistWrapper:
       and self._phase_time() >= pre_lift_time
       and crouch_wire_ready
     ):
-      # Gap uses the rate-limited, measurable winch length reached after the
-      # squat as its new datum; the other modes use the current geometric length.
+      # Use the measured taut length as the new LIFT datum.  This removes the
+      # small fall-arrester extension that can accumulate during SETTLE.
       self.initial_wire_length = actual_length
-      if self.traversal_mode != "gap":
-        self.commanded_wire_length = actual_length
+      self.commanded_wire_length = actual_length
       self.lift_start_wire_length = self.commanded_wire_length
       if self.traversal_mode == "descend":
         self._configure_descent_wire_targets(
@@ -1216,7 +1365,9 @@ class WireAssistWrapper:
         )
       elif self.traversal_mode == "gap":
         self._configure_gap_wire_targets(
+          attachment_pos,
           self.commanded_wire_length,
+          box_top,
           announce=True,
           from_crouch=True,
         )
@@ -1239,6 +1390,14 @@ class WireAssistWrapper:
         ),
         np.sqrt(2.0 * self.wire_acceleration * remaining),
       )
+      if (
+        self.traversal_mode == "gap"
+        and self._phase_time() < self.gap_lift_preload_time
+      ):
+        # First transfer the load from the feet to the cable.  Reeling while
+        # tension is still ramping creates a large stored length error and a
+        # delayed snap once the robot leaves the platform.
+        reel_speed = 0.0
       self.commanded_wire_length = max(
         self.target_wire_length,
         self.commanded_wire_length - reel_speed * self.dt,
@@ -1321,10 +1480,24 @@ class WireAssistWrapper:
     length_error = actual_length - self.commanded_wire_length
     rate_error = self.filtered_wire_rate - commanded_rate
     vertical_fraction = max(cable[2] / actual_length, 0.05)
+    # A real cable cannot pull when its geometric length is shorter than the
+    # paid-out length.  Fade gravity support in only in a narrow band around
+    # the taut boundary; use one-sided extension/rate terms outside it.  The
+    # former unconditional gravity term was applying force to a slack cable
+    # and dragging the robot toward the anchor after it had already followed
+    # the line inward.
+    taut_scale = float(
+      np.clip(
+        (length_error + self.cable_taut_transition)
+        / max(self.cable_taut_transition, 1e-6),
+        0.0,
+        1.0,
+      )
+    )
     tension = (
-      self.robot_weight / vertical_fraction
-      + self.constraint_kp * length_error
-      + self.constraint_kd * rate_error
+      taut_scale * self.robot_weight / vertical_fraction
+      + self.constraint_kp * max(length_error, 0.0)
+      + self.constraint_kd * max(rate_error, 0.0)
     )
 
     if self.phase == self.PHASE_SETTLE and self.traversal_mode == "gap":
@@ -1427,6 +1600,8 @@ class WireAssistWrapper:
       f"{self.waist_torques['roll']:+.1f})Nm "
       f"waist_lock={'ON' if self.waist_lock_active else 'OFF'} "
       f"posture={self.posture_mode or 'policy'} "
+      f"crouch_mix={self.external_crouch_blend:.2f} "
+      f"crouch_depth={self.external_crouch_depth:.2f} "
       f"Lreel={self.lift_start_wire_length - self.commanded_wire_length if self.lift_start_wire_length is not None and self.commanded_wire_length is not None else 0.0:+.3f}m "
       f"wide={'ON' if self.wide_posture_ready else 'OFF'} "
       f"torso_rel_rpy=({np.rad2deg(self.torso_relative_rpy[0]):+.1f},"
@@ -1469,6 +1644,8 @@ class WireAssistWrapper:
     self.last_applied_action = None
     self.gap_crouch_target_action = None
     self.gap_crouch_command_target = None
+    self.external_crouch_blend = 0.0
+    self.external_crouch_depth = 0.0
     self.gap_nominal_hoist_reel_in = None
     self.gap_nominal_payout = None
     self.release_ready_step = None
@@ -1489,7 +1666,11 @@ class WireAssistWrapper:
     robot_com, _, _, _, _, yaw, _ = self._robot_state()
     direction = self.anchor_pos - robot_com
     self.target_heading = float(np.arctan2(direction[1], direction[0]))
-    self._set_walking_command(yaw, allow_forward=True)
+    self._set_walking_command(
+      yaw,
+      lateral_position=robot_com[1],
+      allow_forward=True,
+    )
 
   @staticmethod
   def _has_finished_episode(value):
@@ -1506,7 +1687,11 @@ class WireAssistWrapper:
     if self.target_heading is None:
       direction = self.anchor_pos - robot_com
       self.target_heading = float(np.arctan2(direction[1], direction[0]))
-    heading_aligned = self._set_walking_command(yaw, allow_forward=False)
+    heading_aligned = self._set_walking_command(
+      yaw,
+      lateral_position=robot_com[1],
+      allow_forward=False,
+    )
     desired = self._inextensible_cable_tension(attachment_pos) if heading_aligned else 0.0
     self._apply_cable_force(body_com, attachment_pos, desired)
     if self.phase == self.PHASE_LIFT:
@@ -1521,6 +1706,18 @@ class WireAssistWrapper:
         not self.wide_posture_ready
         and posture_ready
       ):
+        if (
+          self.external_crouch_policy
+          and self.traversal_mode == "gap"
+          and self.last_applied_action is not None
+        ):
+          self.gap_crouch_target_action = (
+            self.last_applied_action.detach().clone()
+          )
+          print(
+            "[WIRE] supported crouch captured for suspension posture",
+            flush=True,
+          )
         self.wide_posture_ready = True
         print(
           f"[WIRE] support established "
@@ -1562,6 +1759,7 @@ class WireAssistWrapper:
     )
     self._set_walking_command(
       yaw,
+      lateral_position=robot_com[1],
       allow_forward=allow_forward,
       forward_scale=forward_scale,
     )
@@ -1572,6 +1770,7 @@ class WireAssistWrapper:
     action_rate_limit = None
     gap_crouch_active = (
       self.traversal_mode == "gap"
+      and not self.external_crouch_policy
       and self.phase == self.PHASE_SETTLE
       and self._phase_time() >= self.gap_crouch_wait_time
     )
@@ -1580,18 +1779,6 @@ class WireAssistWrapper:
       or self.phase in (self.PHASE_CROSS, self.PHASE_LOWER)
     )
     if gap_crouch_active:
-      desired_posture_mode = "gap_crouch"
-      target_posture = self.gap_crouch_target_action
-      transition_time = self.gap_crouch_blend_time
-      action_rate_limit = self.gap_crouch_action_rate_limit
-    elif (
-      self.traversal_mode == "gap"
-      and self.phase == self.PHASE_LIFT
-      and not self.wide_posture_ready
-      and self.gap_crouch_target_action is not None
-    ):
-      # Do not briefly hand control back to the policy between the completed
-      # crouch and the normal suspension lock point.
       desired_posture_mode = "gap_crouch"
       target_posture = self.gap_crouch_target_action
       transition_time = self.gap_crouch_blend_time
@@ -1730,11 +1917,78 @@ class WireAssistWrapper:
   def __getattr__(self, name):
     return getattr(self.env, name)
 
+
+class WalkingCrouchPolicy:
+  """Blend compatible 29-DoF walking and command-conditioned crouch actors."""
+
+  CROUCH_OBSERVATION_SCALE = 0.1
+
+  def __init__(self, walking_policy, crouch_policy, wire_env):
+    self.walking_policy = walking_policy
+    self.crouch_policy = crouch_policy
+    self.wire_env = wire_env
+    action_term = wire_env.env.action_manager.get_term("joint_pos")
+    robot = wire_env.env.scene["robot"]
+    target = robot.data.default_joint_pos[:, action_term.target_ids].clone()
+    for action_id, name in enumerate(action_term.target_names):
+      if name not in CROUCH_TARGET_29DOF:
+        raise ValueError(f"29-DoF crouch target is missing joint {name!r}")
+      target[:, action_id] = CROUCH_TARGET_29DOF[name]
+    scale = action_term.scale
+    if not isinstance(scale, torch.Tensor):
+      scale = torch.full_like(target, float(scale))
+    elif scale.ndim == 1:
+      scale = scale.unsqueeze(0)
+    self.crouch_reference_action = (
+      target - robot.data.default_joint_pos[:, action_term.target_ids]
+    ) / scale
+    self.previous_crouch_reference_action = torch.zeros_like(
+      self.crouch_reference_action
+    )
+
+  def __call__(self, obs):
+    walking_action = self.walking_policy(obs)
+    blend, crouch_depth = self.wire_env.crouch_policy_schedule()
+    if blend <= 0.0:
+      self.previous_crouch_reference_action.zero_()
+      return walking_action
+
+    # Both actors deliberately retain the 98-D walking observation interface:
+    # [ang vel 3, gravity 3, command 3, gait phase 2, ...].  Only the crouch
+    # actor's private copy is changed, so the walking actor still sees the
+    # rule-based zero-velocity command managed by WireAssistWrapper.
+    crouch_obs = obs.clone()
+    actor_obs = crouch_obs["actor"].clone()
+    if actor_obs.shape[-1] != 98:
+      raise RuntimeError(
+        "29-DoF walking/crouch handover expects a 98-D actor observation, "
+        f"got {actor_obs.shape[-1]}"
+      )
+    actor_obs[..., 6] = crouch_depth * self.CROUCH_OBSERVATION_SCALE
+    actor_obs[..., 7:9] = 0.0
+    actor_obs[..., 9:11] = 0.0
+    # Training's custom action term adds the crouch reference after the raw
+    # action has been stored, so its observation[69:98] contains residuals.
+    # The regular walking environment stores the already combined action.
+    # Remove the previous reference here to keep the actor input identical.
+    actor_obs[..., 69:98] -= self.previous_crouch_reference_action
+    crouch_obs.set("actor", actor_obs)
+    crouch_action = self.crouch_policy(crouch_obs)
+    # The crouch task trains residual actions around a command-interpolated
+    # reference.  Playback uses the regular walking action manager, so add the
+    # same reference in normalized action space before blending policies.
+    reference_action = crouch_depth * self.crouch_reference_action
+    crouch_action = crouch_action + reference_action
+    self.previous_crouch_reference_action.copy_(reference_action.detach())
+    return (1.0 - blend) * walking_action + blend * crouch_action
+
+
 @dataclass(frozen=True)
 class PlayConfig:
   agent: Literal["zero", "random", "trained"] = "trained"
   traversal_mode: Literal["ascend", "descend", "gap"] = "gap"
   checkpoint_file: str | None = None
+  crouch_checkpoint_file: str | None = None
   motion_file: str | None = None
   num_envs: int | None = None
   device: str | None = None
@@ -1755,6 +2009,11 @@ def run_play(task_id: str, cfg: PlayConfig):
   agent_cfg = load_rl_cfg(task_id)
   DUMMY_MODE = cfg.agent in {"zero", "random"}
   TRAINED_MODE = not DUMMY_MODE
+  use_crouch_policy = (
+    TRAINED_MODE
+    and cfg.traversal_mode == "gap"
+    and cfg.crouch_checkpoint_file is not None
+  )
 
   if cfg.no_terminations:
     env_cfg.terminations = {}
@@ -1834,6 +2093,13 @@ def run_play(task_id: str, cfg: PlayConfig):
 
   render_mode = "rgb_array" if (TRAINED_MODE and cfg.video) else None
   env = ManagerBasedRlEnv(cfg=env_cfg, device=device, render_mode=render_mode)
+  if use_crouch_policy and env.action_manager.total_action_dim != 29:
+    env.close()
+    raise ValueError(
+      "The learned gap crouch policy requires a 29-DoF walking task "
+      f"(29 actions), but {task_id!r} has "
+      f"{env.action_manager.total_action_dim} actions."
+    )
 
   # =========================================================================
   # All profiles share the same state machine.  Only edge detection, cable
@@ -1854,7 +2120,7 @@ def run_play(task_id: str, cfg: PlayConfig):
     f"anchor={anchor_pos} walk_speed={walk_speed:.2f}m/s",
     flush=True,
   )
-  env = WireAssistWrapper(
+  wire_env = WireAssistWrapper(
     env,
     traversal_mode=cfg.traversal_mode,
     anchor_pos=anchor_pos,
@@ -1864,8 +2130,10 @@ def run_play(task_id: str, cfg: PlayConfig):
       else ("obstacle_box", "obstacle", "wall_front")
     ),
     lin_vel_x=walk_speed,
+    external_crouch_policy=use_crouch_policy,
   )
-  
+  env = wire_env
+
   if TRAINED_MODE and cfg.video:
     env = VideoRecorder(env, video_folder=log_dir / "videos" / "play", step_trigger=lambda step: step == 0, video_length=cfg.video_length, disable_logger=True)
 
@@ -1884,7 +2152,44 @@ def run_play(task_id: str, cfg: PlayConfig):
     runner_cls = load_runner_cls(task_id) or MjlabOnPolicyRunner
     runner = runner_cls(env, asdict(agent_cfg), device=device)
     runner.load(str(resume_path), load_cfg={"actor": True}, strict=True, map_location=device)
-    policy = runner.get_inference_policy(device=device)
+    walking_policy = runner.get_inference_policy(device=device)
+    policy = walking_policy
+    if use_crouch_policy:
+      crouch_path = Path(cfg.crouch_checkpoint_file).expanduser().resolve()
+      if not crouch_path.is_file():
+        env.close()
+        raise FileNotFoundError(
+          f"Crouch checkpoint not found: {crouch_path}"
+        )
+      crouch_agent_cfg = load_rl_cfg("Unitree-G1-Crouch")
+      crouch_runner_cls = (
+        load_runner_cls("Unitree-G1-Crouch") or MjlabOnPolicyRunner
+      )
+      crouch_runner = crouch_runner_cls(
+        env,
+        asdict(crouch_agent_cfg),
+        device=device,
+      )
+      crouch_runner.load(
+        str(crouch_path),
+        load_cfg={"actor": True},
+        strict=True,
+        map_location=device,
+      )
+      crouch_policy = crouch_runner.get_inference_policy(device=device)
+      policy = WalkingCrouchPolicy(
+        walking_policy,
+        crouch_policy,
+        wire_env,
+      )
+      print(
+        "[POLICY] 29-DoF walking/crouch handover enabled: "
+        f"checkpoint={crouch_path} "
+        f"handover={wire_env.gap_policy_handover_time:.2f}s "
+        f"crouch={wire_env.gap_crouch_blend_time:.2f}s "
+        f"depth={wire_env.gap_crouch_depth:.2f}",
+        flush=True,
+      )
 
   if cfg.viewer == "auto":
     has_display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))

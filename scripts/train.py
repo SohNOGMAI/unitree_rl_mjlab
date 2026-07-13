@@ -1,6 +1,7 @@
 """Script to train RL agent with RSL-RL."""
 
 import logging
+import math
 import os
 import sys
 from dataclasses import asdict, dataclass, field
@@ -8,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal, cast
 
+import torch
 import tyro
 
 from mjlab.envs import ManagerBasedRlEnv, ManagerBasedRlEnvCfg
@@ -24,6 +26,10 @@ from mjlab.utils.wrappers import VideoRecorder
 class TrainConfig:
   env: ManagerBasedRlEnvCfg
   agent: RslRlBaseRunnerCfg
+  checkpoint_file: str | None = None
+  checkpoint_load_mode: Literal["resume", "actor", "models"] = "resume"
+  actor_std: float | None = None
+  freeze_actor: bool = False
   motion_file: str | None = None
   video: bool = False
   video_length: int = 200
@@ -96,11 +102,15 @@ def run_train(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
   log_root_path = log_dir.parent  # Go up from specific run dir to experiment dir.
 
   resume_path: Path | None = None
-  if cfg.agent.resume:
-      # Load checkpoint from local filesystem.
-      resume_path = get_checkpoint_path(
-        log_root_path, cfg.agent.load_run, cfg.agent.load_checkpoint
-      )
+  if cfg.checkpoint_file is not None:
+    resume_path = Path(cfg.checkpoint_file).expanduser().resolve()
+    if not resume_path.is_file():
+      raise FileNotFoundError(f"Checkpoint file not found: {resume_path}")
+  elif cfg.agent.resume:
+    # Load checkpoint from local filesystem.
+    resume_path = get_checkpoint_path(
+      log_root_path, cfg.agent.load_run, cfg.agent.load_checkpoint
+    )
 
   # Only record videos on rank 0 to avoid multiple workers writing to the same files.
   if cfg.video and rank == 0:
@@ -128,7 +138,47 @@ def run_train(task_id: str, cfg: TrainConfig, log_dir: Path) -> None:
   runner.add_git_repo_to_log(__file__)
   if resume_path is not None:
     print(f"[INFO]: Loading model checkpoint from: {resume_path}")
-    runner.load(str(resume_path))
+    if cfg.checkpoint_load_mode in ("actor", "models"):
+      # Transfer only the policy and its observation normalizer.  The crouch
+      # task has a different value function and should use a fresh critic and
+      # optimizer even though its actor interface matches the walking task.
+      load_models = cfg.checkpoint_load_mode == "models"
+      runner.load(
+        str(resume_path),
+        load_cfg={
+          "actor": True,
+          "critic": load_models,
+          "optimizer": False,
+          "iteration": False,
+        },
+        strict=True,
+        map_location=device,
+      )
+      print(
+        "[INFO]: Warm-started "
+        + ("actor and critic" if load_models else "actor only")
+        + "; optimizer is fresh"
+      )
+    else:
+      runner.load(str(resume_path), map_location=device)
+  if cfg.actor_std is not None:
+    if cfg.actor_std <= 0.0:
+      raise ValueError("--actor-std must be positive")
+    distribution = runner.alg.get_policy().distribution
+    with torch.no_grad():
+      if hasattr(distribution, "std_param"):
+        distribution.std_param.fill_(cfg.actor_std)
+      elif hasattr(distribution, "log_std_param"):
+        distribution.log_std_param.fill_(math.log(cfg.actor_std))
+      else:
+        raise TypeError(
+          "The selected actor distribution does not expose a resettable std"
+        )
+    print(f"[INFO]: Actor exploration std reset to {cfg.actor_std:.3f}")
+  if cfg.freeze_actor:
+    for parameter in runner.alg.get_policy().parameters():
+      parameter.requires_grad_(False)
+    print("[INFO]: Actor frozen; training critic only")
 
   # Only write config files from rank 0 to avoid race conditions.
   if rank == 0:
