@@ -1330,6 +1330,7 @@ class WireAssistWrapper:
       )
       + self.gap_crouch_blend_time
       + self.gap_crouch_settle_time
+      
       if self.traversal_mode == "gap"
       else max(
         self.settle_time,
