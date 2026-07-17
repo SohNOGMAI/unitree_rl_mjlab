@@ -42,8 +42,8 @@ def unitree_g1_crouch_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
       max_grad_norm=1.0,
     ),
     experiment_name="g1_crouch",
-    run_name="walking_warm_start",
-    save_interval=100,
+    run_name="forward_lean_stage2",
+    save_interval=25,
     num_steps_per_env=24,
-    max_iterations=2000,
+    max_iterations=200,
   )

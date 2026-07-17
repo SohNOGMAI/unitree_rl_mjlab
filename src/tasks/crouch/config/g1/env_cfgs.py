@@ -13,21 +13,25 @@ from src.tasks.velocity.config.g1.env_cfgs import unitree_g1_flat_env_cfg
 
 
 CROUCH_TARGET_29DOF = {
-  r"left_hip_pitch_joint": -0.45,
-  r"right_hip_pitch_joint": -0.45,
+  # This sagittal chain sums to -0.15 rad at full depth.  With level feet the
+  # pelvis therefore leans forward instead of retreating behind the heels.
+  # At the deployed depth of 0.75, forward kinematics gives approximately
+  # +6.4 deg pelvis pitch, +9.9 deg torso pitch and a +4.5 cm COM offset.
+  r"left_hip_pitch_joint": -0.55,
+  r"right_hip_pitch_joint": -0.55,
   r"left_hip_roll_joint": 0.0,
   r"right_hip_roll_joint": 0.0,
   r"left_hip_yaw_joint": 0.0,
   r"right_hip_yaw_joint": 0.0,
-  r"left_knee_joint": 0.90,
-  r"right_knee_joint": 0.90,
-  r"left_ankle_pitch_joint": -0.45,
-  r"right_ankle_pitch_joint": -0.45,
+  r"left_knee_joint": 0.95,
+  r"right_knee_joint": 0.95,
+  r"left_ankle_pitch_joint": -0.55,
+  r"right_ankle_pitch_joint": -0.55,
   r"left_ankle_roll_joint": 0.0,
   r"right_ankle_roll_joint": 0.0,
   r"waist_yaw_joint": 0.0,
   r"waist_roll_joint": 0.0,
-  r"waist_pitch_joint": 0.0,
+  r"waist_pitch_joint": 0.08,
   r"left_shoulder_pitch_joint": 0.80,
   r"right_shoulder_pitch_joint": 0.80,
   r"left_shoulder_roll_joint": 0.30,
@@ -159,6 +163,7 @@ def unitree_g1_crouch_env_cfg(play: bool = False):
             ".*_hip_pitch_joint",
             ".*_knee_joint",
             ".*_ankle_pitch_joint",
+            "waist_pitch_joint",
           ),
         ),
       },
@@ -194,11 +199,57 @@ def unitree_g1_crouch_env_cfg(play: bool = False):
       weight=1.0,
       params={"sensor_name": "feet_ground_contact", "std": 0.25},
     ),
-    "upright_torso": RewardTermCfg(
-      func=velocity_mdp.body_orientation_l2,
-      weight=-3.0,
+    "target_torso_attitude": RewardTermCfg(
+      func=mdp.target_body_attitude_error,
+      # Stage 2: once the policy can crouch without falling, make the intended
+      # forward lean materially more valuable than the inherited upright
+      # walking solution.
+      weight=-100.0,
       params={
-        "asset_cfg": SceneEntityCfg("robot", body_names=("torso_link",))
+        # 13.2 deg at command depth 1.0 becomes about 9.9 deg at the deployed
+        # maximum depth of 0.75.
+        "target_pitch_at_full_depth": math.radians(13.2),
+        "roll_scale": 1.5,
+        "command_name": "twist",
+        "command_index": 0,
+        "metric_prefix": "crouch_torso",
+        "asset_cfg": SceneEntityCfg("robot", body_names=("torso_link",)),
+      },
+    ),
+    "target_pelvis_attitude": RewardTermCfg(
+      func=mdp.target_body_attitude_error,
+      weight=-60.0,
+      params={
+        # 8.6 deg at depth 1.0 becomes about 6.4 deg at depth 0.75.
+        "target_pitch_at_full_depth": math.radians(8.6),
+        "roll_scale": 2.0,
+        "command_name": "twist",
+        "command_index": 0,
+        "metric_prefix": "crouch_pelvis",
+        "asset_cfg": SceneEntityCfg("robot", body_names=("pelvis",)),
+      },
+    ),
+    "backward_torso": RewardTermCfg(
+      func=mdp.backward_body_pitch_cost,
+      weight=-60.0,
+      params={
+        "tolerance": math.radians(1.0),
+        "metric_prefix": "crouch_torso",
+        "asset_cfg": SceneEntityCfg("robot", body_names=("torso_link",)),
+      },
+    ),
+    "whole_body_com_support": RewardTermCfg(
+      func=mdp.whole_body_com_midfeet_error,
+      weight=-300.0,
+      params={
+        # The kinematic reference yields +4.5 cm at depth 0.75.
+        "target_forward_offset_at_full_depth": 0.060,
+        "lateral_scale": 2.0,
+        "command_name": "twist",
+        "command_index": 0,
+        "asset_cfg": SceneEntityCfg(
+          "robot", site_names=("left_foot", "right_foot")
+        ),
       },
     ),
     "planted_feet": RewardTermCfg(

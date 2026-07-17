@@ -11,12 +11,38 @@ from mjlab.entity import Entity
 from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import ContactSensor
+from mjlab.utils.lab_api.math import quat_apply_inverse
 
 if TYPE_CHECKING:
   from mjlab.envs import ManagerBasedRlEnv
 
 
 _ROBOT_CFG = SceneEntityCfg("robot")
+
+
+def _body_roll_pitch(
+  asset: Entity,
+  asset_cfg: SceneEntityCfg,
+) -> tuple[torch.Tensor, torch.Tensor]:
+  """Return world-referenced roll and pitch for one selected body.
+
+  Projected gravity is yaw invariant, which is important because crouch resets
+  retain a small randomized heading.  Positive pitch means leaning toward the
+  robot's +x (forward) direction.
+  """
+  body_quat_w = asset.data.body_link_quat_w[:, asset_cfg.body_ids, :]
+  if body_quat_w.shape[1] != 1:
+    raise ValueError("Body attitude terms require exactly one selected body")
+  projected_gravity_b = quat_apply_inverse(
+    body_quat_w[:, 0, :], asset.data.gravity_vec_w
+  )
+  roll = torch.atan2(
+    -projected_gravity_b[:, 1], -projected_gravity_b[:, 2]
+  )
+  pitch = torch.atan2(
+    projected_gravity_b[:, 0], -projected_gravity_b[:, 2]
+  )
+  return roll, pitch
 
 
 class target_joint_posture_error:
@@ -178,6 +204,106 @@ def target_root_height_error(
   error = height - commanded_height
   env.extras["log"]["Metrics/crouch_root_height"] = torch.mean(height)
   return torch.square(error)
+
+
+def target_body_attitude_error(
+  env: ManagerBasedRlEnv,
+  target_pitch_at_full_depth: float,
+  roll_scale: float,
+  command_name: str,
+  command_index: int,
+  metric_prefix: str,
+  asset_cfg: SceneEntityCfg,
+) -> torch.Tensor:
+  """Track a forward body lean while keeping lateral attitude level.
+
+  The desired pitch is interpolated with the same normalized depth command as
+  the joint reference.  Standing therefore retains a zero-pitch target, while
+  the torso and pelvis lean forward gradually during the crouch.
+  """
+  asset: Entity = env.scene[asset_cfg.name]
+  roll, pitch = _body_roll_pitch(asset, asset_cfg)
+  depth = torch.clamp(
+    env.command_manager.get_command(command_name)[:, command_index],
+    min=0.0,
+    max=1.0,
+  )
+  target_pitch = depth * target_pitch_at_full_depth
+  pitch_error = pitch - target_pitch
+  env.extras["log"][f"Metrics/{metric_prefix}_pitch_deg"] = (
+    torch.rad2deg(torch.mean(pitch))
+  )
+  env.extras["log"][f"Metrics/{metric_prefix}_target_pitch_deg"] = (
+    torch.rad2deg(torch.mean(target_pitch))
+  )
+  env.extras["log"][f"Metrics/{metric_prefix}_roll_deg"] = (
+    torch.rad2deg(torch.mean(roll))
+  )
+  return torch.square(pitch_error) + roll_scale * torch.square(roll)
+
+
+def backward_body_pitch_cost(
+  env: ManagerBasedRlEnv,
+  tolerance: float,
+  metric_prefix: str,
+  asset_cfg: SceneEntityCfg,
+) -> torch.Tensor:
+  """Apply an asymmetric penalty only when a body leans backward."""
+  asset: Entity = env.scene[asset_cfg.name]
+  _, pitch = _body_roll_pitch(asset, asset_cfg)
+  backward_angle = torch.relu(-pitch - tolerance)
+  env.extras["log"][f"Metrics/{metric_prefix}_backward_deg"] = (
+    torch.rad2deg(torch.mean(backward_angle))
+  )
+  return torch.square(backward_angle)
+
+
+def whole_body_com_midfeet_error(
+  env: ManagerBasedRlEnv,
+  target_forward_offset_at_full_depth: float,
+  lateral_scale: float,
+  command_name: str,
+  command_index: int,
+  asset_cfg: SceneEntityCfg,
+) -> torch.Tensor:
+  """Keep the whole-robot COM over a depth-dependent point between the feet.
+
+  MuJoCo's subtree COM at the robot root contains the mass-weighted COM of the
+  complete articulated robot.  Expressing the COM-minus-midfoot vector in the
+  root frame makes the forward target independent of randomized reset yaw.
+  """
+  asset: Entity = env.scene[asset_cfg.name]
+  if len(asset_cfg.site_ids) != 2:
+    raise ValueError("COM support term requires exactly two foot sites")
+  robot_com_w = asset.data.data.subtree_com[
+    :, asset.data.indexing.root_body_id, :
+  ]
+  midfeet_w = torch.mean(
+    asset.data.site_pos_w[:, asset_cfg.site_ids, :], dim=1
+  )
+  com_from_midfeet_b = quat_apply_inverse(
+    asset.data.root_link_quat_w, robot_com_w - midfeet_w
+  )
+  depth = torch.clamp(
+    env.command_manager.get_command(command_name)[:, command_index],
+    min=0.0,
+    max=1.0,
+  )
+  target_forward = depth * target_forward_offset_at_full_depth
+  forward_error = com_from_midfeet_b[:, 0] - target_forward
+  lateral_error = com_from_midfeet_b[:, 1]
+  env.extras["log"]["Metrics/crouch_com_forward"] = torch.mean(
+    com_from_midfeet_b[:, 0]
+  )
+  env.extras["log"]["Metrics/crouch_com_target_forward"] = torch.mean(
+    target_forward
+  )
+  env.extras["log"]["Metrics/crouch_com_lateral"] = torch.mean(
+    com_from_midfeet_b[:, 1]
+  )
+  return torch.square(forward_error) + lateral_scale * torch.square(
+    lateral_error
+  )
 
 
 def target_root_height(

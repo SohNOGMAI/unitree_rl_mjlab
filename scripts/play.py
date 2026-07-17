@@ -69,7 +69,7 @@ class WireAssistWrapper:
     heading_kp=0.0,
     max_yaw_rate=0.0,
     turn_in_place_threshold=np.deg2rad(8.0),
-    approach_distance=0.40,
+    approach_distance=0.60,
     clearance=0.10,
     lift_kp=50.0,
     lift_kd=90.0,
@@ -98,6 +98,7 @@ class WireAssistWrapper:
     descent_payout_speed=1.00,
     descent_payout_acceleration=0.04,
     descent_hold_time=0.1,
+    descent_assisted_policy_hold_time=2.5,
     descent_posture_blend_time=2.0,
     descent_posture_action_rate_limit=2.50,
     gap_approach_distance=0.75,
@@ -115,7 +116,7 @@ class WireAssistWrapper:
     gap_posture_action_rate_limit=0.80,
     gap_crouch_wait_time=2.0,
     gap_policy_handover_time=1.0,
-    gap_crouch_blend_time=8.0,
+    gap_crouch_blend_time=2.0, #syagamujikan
     gap_crouch_settle_time=1.0,
     gap_crouch_depth=CROUCH_MAX_DEPTH,
     gap_crouch_action_rate_limit=0.25,
@@ -146,6 +147,7 @@ class WireAssistWrapper:
     pitch_payout_speed=0.45,
     lock_posture_during_lift=False,
     posture_lock_reel_in_length=0.10,
+    crouched_posture_lock_reel_in_length=0.02,
     brace_start_time=0.5,
     brace_blend_time=2.0,
     brace_action_rate_limit=0.80,
@@ -214,6 +216,9 @@ class WireAssistWrapper:
     self.descent_payout_speed = descent_payout_speed
     self.descent_payout_acceleration = descent_payout_acceleration
     self.descent_hold_time = descent_hold_time
+    self.descent_assisted_policy_hold_time = (
+      descent_assisted_policy_hold_time
+    )
     self.descent_posture_blend_time = descent_posture_blend_time
     self.descent_posture_action_rate_limit = (
       descent_posture_action_rate_limit
@@ -268,6 +273,9 @@ class WireAssistWrapper:
     self.pitch_payout_speed = pitch_payout_speed
     self.lock_posture_during_lift = lock_posture_during_lift
     self.posture_lock_reel_in_length = posture_lock_reel_in_length
+    self.crouched_posture_lock_reel_in_length = (
+      crouched_posture_lock_reel_in_length
+    )
     self.brace_start_time = brace_start_time
     self.brace_blend_time = brace_blend_time
     self.brace_action_rate_limit = brace_action_rate_limit
@@ -437,6 +445,9 @@ class WireAssistWrapper:
     self.external_crouch_depth = 0.0
     self.gap_nominal_hoist_reel_in = None
     self.gap_nominal_payout = None
+    self.ascend_nominal_hoist_reel_in = None
+    self.ascend_nominal_payout = None
+    self.descent_nominal_landing_length = None
     self.release_ready_step = None
     self.torso_roll = 0.0
     self.waist_roll_angle = 0.0
@@ -863,7 +874,6 @@ class WireAssistWrapper:
     """Return walking/crouch blend and normalized crouch-depth commands."""
     if (
       self.external_crouch_policy
-      and self.traversal_mode == "gap"
       and self.phase == self.PHASE_LIFT
       and not self.wide_posture_ready
     ):
@@ -875,7 +885,6 @@ class WireAssistWrapper:
       return 1.0, self.gap_crouch_depth
     if (
       not self.external_crouch_policy
-      or self.traversal_mode != "gap"
       or self.phase != self.PHASE_SETTLE
     ):
       self.external_crouch_blend = 0.0
@@ -1081,8 +1090,9 @@ class WireAssistWrapper:
     box_bottom,
     box_top,
     announce=False,
+    from_crouch=False,
   ):
-    """Update preload and landing lengths from the current support posture."""
+    """Update preload from the crouch while preserving the landing geometry."""
     self.target_wire_length = max(
       actual_length - self.descent_preload_reel_in,
       0.05,
@@ -1097,20 +1107,75 @@ class WireAssistWrapper:
       - ground_attachment_z
       + self.descent_landing_length_margin
     )
-    requested_landing_length = (
-      computed_landing_length
-      if self.descent_release_wire_length is None
-      else float(self.descent_release_wire_length)
-    )
+    if not from_crouch or self.descent_nominal_landing_length is None:
+      self.descent_nominal_landing_length = (
+        computed_landing_length
+        if self.descent_release_wire_length is None
+        else float(self.descent_release_wire_length)
+      )
     self.release_target_wire_length = max(
-      requested_landing_length,
+      self.descent_nominal_landing_length,
       self.target_wire_length,
     )
     if announce:
       print(
-        "[WIRE] descent profile armed: "
+        "[WIRE] descent profile armed"
+        f" ({'crouched' if from_crouch else 'standing'} geometry): "
         f"Lpreload={self.target_wire_length:.3f}m "
         f"Llanding={self.release_target_wire_length:.3f}m",
+        flush=True,
+      )
+
+  def _configure_ascend_wire_targets(
+    self,
+    actual_length,
+    announce=False,
+    from_crouch=False,
+  ):
+    """Preserve the standing reel/payout travel after crouching.
+
+    Crouching lowers the rear attachment and changes its geometric distance to
+    the ceiling anchor.  The traversal objective is the amount reeled in, not
+    one world-specific absolute cable length, so measure that travel in the
+    standing pose and apply it again from the crouched cable length.
+    """
+    if (
+      not from_crouch
+      or self.ascend_nominal_hoist_reel_in is None
+      or self.ascend_nominal_payout is None
+    ):
+      target = max(
+        min(self.hoist_target_wire_length, actual_length),
+        0.05,
+      )
+      release = (
+        actual_length
+        if self.configured_release_target_wire_length is None
+        else max(
+          float(self.configured_release_target_wire_length),
+          target,
+        )
+      )
+      self.ascend_nominal_hoist_reel_in = max(actual_length - target, 0.0)
+      self.ascend_nominal_payout = max(release - target, 0.0)
+
+    self.target_wire_length = max(
+      actual_length - self.ascend_nominal_hoist_reel_in,
+      0.05,
+    )
+    self.release_target_wire_length = max(
+      self.target_wire_length + self.ascend_nominal_payout,
+      self.target_wire_length,
+    )
+    if announce:
+      print(
+        "[WIRE] ascend profile armed"
+        f" ({'crouched' if from_crouch else 'standing'} geometry): "
+        f"Lstart={actual_length:.3f}m "
+        f"Lhoist={self.target_wire_length:.3f}m "
+        f"Lrelease={self.release_target_wire_length:.3f}m "
+        f"reel={self.ascend_nominal_hoist_reel_in:.3f}m "
+        f"payout={self.ascend_nominal_payout:.3f}m",
         flush=True,
       )
 
@@ -1197,11 +1262,7 @@ class WireAssistWrapper:
     if self.traversal_mode == "gap":
       return (
         "gap_suspension",
-        (
-          self.gap_crouch_target_action
-          if self.gap_crouch_target_action is not None
-          else self.gap_posture_action
-        ),
+        self.gap_posture_action,
         self.gap_posture_blend_time,
         self.gap_posture_action_rate_limit,
       )
@@ -1263,17 +1324,9 @@ class WireAssistWrapper:
             announce=True,
           )
         else:
-          self.target_wire_length = max(
-            min(self.hoist_target_wire_length, self.initial_wire_length),
-            0.05,
-          )
-          self.release_target_wire_length = (
-            self.initial_wire_length
-            if self.configured_release_target_wire_length is None
-            else max(
-              float(self.configured_release_target_wire_length),
-              self.target_wire_length,
-            )
+          self._configure_ascend_wire_targets(
+            self.initial_wire_length,
+            announce=True,
           )
         self._set_phase(self.PHASE_SETTLE)
 
@@ -1321,20 +1374,24 @@ class WireAssistWrapper:
       ):
         self.release_target_wire_length = actual_length
 
-    pre_lift_time = (
+    crouch_sequence_time = (
       self.gap_crouch_wait_time
-      + (
-        self.gap_policy_handover_time
-        if self.external_crouch_policy
-        else 0.0
-      )
+      + self.gap_policy_handover_time
       + self.gap_crouch_blend_time
       + self.gap_crouch_settle_time
-      
-      if self.traversal_mode == "gap"
-      else max(
-        self.settle_time,
-        self.brace_start_time + self.brace_blend_time,
+    )
+    pre_lift_time = (
+      crouch_sequence_time
+      if self.external_crouch_policy
+      else (
+        self.gap_crouch_wait_time
+        + self.gap_crouch_blend_time
+        + self.gap_crouch_settle_time
+        if self.traversal_mode == "gap"
+        else max(
+          self.settle_time,
+          self.brace_start_time + self.brace_blend_time,
+        )
       )
     )
     crouch_wire_ready = (
@@ -1363,12 +1420,19 @@ class WireAssistWrapper:
           box_bottom,
           box_top,
           announce=True,
+          from_crouch=True,
         )
       elif self.traversal_mode == "gap":
         self._configure_gap_wire_targets(
           attachment_pos,
           self.commanded_wire_length,
           box_top,
+          announce=True,
+          from_crouch=True,
+        )
+      else:
+        self._configure_ascend_wire_targets(
+          actual_length,
           announce=True,
           from_crouch=True,
         )
@@ -1464,8 +1528,13 @@ class WireAssistWrapper:
       self.commanded_wire_length = (
         self.release_target_wire_length or self.initial_wire_length
       )
+      assisted_policy_hold_time = (
+        self.descent_assisted_policy_hold_time
+        if self.traversal_mode == "descend"
+        else self.assisted_policy_hold_time
+      )
       if self._phase_time() >= max(
-        self.assisted_policy_hold_time,
+        assisted_policy_hold_time,
         self.policy_resume_blend_time,
       ):
         self._set_phase(self.PHASE_RELEASE)
@@ -1650,6 +1719,9 @@ class WireAssistWrapper:
     self.external_crouch_depth = 0.0
     self.gap_nominal_hoist_reel_in = None
     self.gap_nominal_payout = None
+    self.ascend_nominal_hoist_reel_in = None
+    self.ascend_nominal_payout = None
+    self.descent_nominal_landing_length = None
     self.release_ready_step = None
     self.torso_roll = 0.0
     self.waist_roll_angle = 0.0
@@ -1703,23 +1775,16 @@ class WireAssistWrapper:
         self.lift_start_wire_length - float(self.commanded_wire_length),
         0.0,
       )
-      posture_ready = reel_in_length >= self.posture_lock_reel_in_length
+      posture_lock_reel_in_length = (
+        self.crouched_posture_lock_reel_in_length
+        if self.external_crouch_policy
+        else self.posture_lock_reel_in_length
+      )
+      posture_ready = reel_in_length >= posture_lock_reel_in_length
       if (
         not self.wide_posture_ready
         and posture_ready
       ):
-        if (
-          self.external_crouch_policy
-          and self.traversal_mode == "gap"
-          and self.last_applied_action is not None
-        ):
-          self.gap_crouch_target_action = (
-            self.last_applied_action.detach().clone()
-          )
-          print(
-            "[WIRE] supported crouch captured for suspension posture",
-            flush=True,
-          )
         self.wide_posture_ready = True
         print(
           f"[WIRE] support established "
@@ -1991,6 +2056,10 @@ class PlayConfig:
   traversal_mode: Literal["ascend", "descend", "gap"] = "gap"
   checkpoint_file: str | None = None
   crouch_checkpoint_file: str | None = None
+  crouch_depth: float = CROUCH_MAX_DEPTH
+  crouch_blend_time: float = 8.0
+  crouch_settle_time: float = 1.0
+  crouch_wait_time: float = 2.0
   motion_file: str | None = None
   num_envs: int | None = None
   device: str | None = None
@@ -2017,7 +2086,6 @@ def run_play(task_id: str, cfg: PlayConfig):
   TRAINED_MODE = not DUMMY_MODE
   use_crouch_policy = (
     TRAINED_MODE
-    and cfg.traversal_mode == "gap"
     and cfg.crouch_checkpoint_file is not None
   )
 
@@ -2106,7 +2174,7 @@ def run_play(task_id: str, cfg: PlayConfig):
   if use_crouch_policy and env.action_manager.total_action_dim != 29:
     env.close()
     raise ValueError(
-      "The learned gap crouch policy requires a 29-DoF walking task "
+      "The learned crouch policy requires a 29-DoF walking task "
       f"(29 actions), but {task_id!r} has "
       f"{env.action_manager.total_action_dim} actions."
     )
@@ -2140,6 +2208,10 @@ def run_play(task_id: str, cfg: PlayConfig):
       else ("obstacle_box", "obstacle", "wall_front")
     ),
     lin_vel_x=walk_speed,
+    gap_crouch_wait_time=cfg.crouch_wait_time,
+    gap_crouch_blend_time=cfg.crouch_blend_time,
+    gap_crouch_settle_time=cfg.crouch_settle_time,
+    gap_crouch_depth=cfg.crouch_depth,
     external_crouch_policy=use_crouch_policy,
   )
   env = wire_env
@@ -2194,6 +2266,7 @@ def run_play(task_id: str, cfg: PlayConfig):
       )
       print(
         "[POLICY] 29-DoF walking/crouch handover enabled: "
+        f"mode={cfg.traversal_mode} "
         f"checkpoint={crouch_path} "
         f"handover={wire_env.gap_policy_handover_time:.2f}s "
         f"crouch={wire_env.gap_crouch_blend_time:.2f}s "
