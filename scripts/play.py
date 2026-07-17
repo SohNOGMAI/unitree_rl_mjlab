@@ -69,19 +69,20 @@ class WireAssistWrapper:
     heading_kp=0.0,
     max_yaw_rate=0.0,
     turn_in_place_threshold=np.deg2rad(8.0),
-    approach_distance=0.60,
+    approach_distance=0.50,
     clearance=0.10,
     lift_kp=50.0,
     lift_kd=90.0,
     pitch_kp=70.0,
     lift_support_ratio=1.25,
     max_tension=48.0 * 9.80665,
+    ascend_max_tension=40.0 * 9.80665,
     tension_rate=1200.0,
     tension_release_rate=200.0,
     reel_in_speed=0.05,
     payout_speed=0.3,
     max_reel_in=1.00,
-    hoist_target_wire_length=0.58,
+    hoist_target_wire_length=0.63,
     release_target_wire_length=0.90,
     winch_kp=1500.0,
 
@@ -95,26 +96,28 @@ class WireAssistWrapper:
     descent_release_wire_length=None,
     descent_landing_length_margin=0.15,
     descent_reel_in_speed=0.05,
-    descent_payout_speed=1.00,
+    descent_payout_speed=0.50,
     descent_payout_acceleration=0.04,
     descent_hold_time=0.1,
     descent_assisted_policy_hold_time=2.5,
     descent_posture_blend_time=2.0,
     descent_posture_action_rate_limit=2.50,
-    gap_approach_distance=0.75,
+    gap_approach_distance=0.40,
     gap_hoist_wire_length=None,
     gap_release_wire_length=None,
     gap_hoist_clearance=0.20,
     gap_landing_length_margin=0.02,
     gap_reel_in_speed=0.12,
-    gap_lift_preload_time=1.5,
-    gap_lift_tension_rate=250.0,
+    gap_lift_preload_time=0.5,
+    gap_lift_tension_rate=5000.0,
+    gap_constraint_kp=5000.0,
+    gap_constraint_kd=1000.0,
     gap_payout_speed=0.20,
     gap_payout_acceleration=0.05,
     gap_hold_time=0.5,
     gap_posture_blend_time=1.5,
     gap_posture_action_rate_limit=0.80,
-    gap_crouch_wait_time=2.0,
+    gap_crouch_wait_time=1.0,
     gap_policy_handover_time=1.0,
     gap_crouch_blend_time=2.0, #syagamujikan
     gap_crouch_settle_time=1.0,
@@ -195,7 +198,9 @@ class WireAssistWrapper:
     self.lift_kp, self.lift_kd = lift_kp, lift_kd
     self.pitch_kp = pitch_kp
     self.lift_support_ratio = lift_support_ratio
-    self.max_tension, self.tension_rate = max_tension, tension_rate
+    self.max_tension = max_tension
+    self.ascend_max_tension = ascend_max_tension
+    self.tension_rate = tension_rate
     self.tension_release_rate = tension_release_rate
     self.reel_in_speed = reel_in_speed
     self.payout_speed = payout_speed
@@ -231,6 +236,8 @@ class WireAssistWrapper:
     self.gap_reel_in_speed = gap_reel_in_speed
     self.gap_lift_preload_time = gap_lift_preload_time
     self.gap_lift_tension_rate = gap_lift_tension_rate
+    self.gap_constraint_kp = gap_constraint_kp
+    self.gap_constraint_kd = gap_constraint_kd
     self.gap_payout_speed = gap_payout_speed
     self.gap_payout_acceleration = gap_payout_acceleration
     self.gap_hold_time = gap_hold_time
@@ -445,6 +452,7 @@ class WireAssistWrapper:
     self.external_crouch_depth = 0.0
     self.gap_nominal_hoist_reel_in = None
     self.gap_nominal_payout = None
+    self.gap_swing_landing_x = None
     self.ascend_nominal_hoist_reel_in = None
     self.ascend_nominal_payout = None
     self.descent_nominal_landing_length = None
@@ -877,9 +885,8 @@ class WireAssistWrapper:
       and self.phase == self.PHASE_LIFT
       and not self.wide_posture_ready
     ):
-      # Keep closed-loop balance control until the winch encoder confirms that
-      # enough cable has been reeled in to support the robot.  No world-frame
-      # height measurement is needed for this handover.
+      # Retain closed-loop crouch balance until cable support is established,
+      # then the fixed suspension posture takes over.
       self.external_crouch_blend = 1.0
       self.external_crouch_depth = self.gap_crouch_depth
       return 1.0, self.gap_crouch_depth
@@ -1035,7 +1042,12 @@ class WireAssistWrapper:
     return float(np.clip(target_tension, 0.0, self.max_tension))
 
   def _apply_cable_force(self, body_com, attachment_pos, desired_tension):
-    limited_target = float(np.clip(desired_tension, 0.0, self.max_tension))
+    tension_limit = (
+      self.ascend_max_tension
+      if self.traversal_mode == "ascend"
+      else self.max_tension
+    )
+    limited_target = float(np.clip(desired_tension, 0.0, tension_limit))
     # Active hoisting/lowering needs enough bandwidth to brake oscillation.
     # Only the final RELEASE uses the deliberately gentle force ramp-down.
     if self.phase == self.PHASE_SETTLE and self.traversal_mode == "gap":
@@ -1187,17 +1199,12 @@ class WireAssistWrapper:
     announce=False,
     from_crouch=False,
   ):
-    """Compute gap lengths from the measured support posture and geometry.
+    """Derive hoist and landing lengths for a supported Tarzan arc.
 
-    When the attachment is vertically below the ceiling anchor, its cable
-    length equals the vertical separation.  The current attachment height
-    above the take-off platform is also the height needed for the feet to
-    touch the equal-height landing platform.  This gives a measurable landing
-    length without relying on foot positions.  Hoisting shortens that length
-    only by the requested clearance.
-
-    Explicit ``gap_*_wire_length`` values remain available as experimental
-    overrides, but the geometry-derived profile is the safe default.
+    The robot first gains horizontal motion like a pendulum, while controlled
+    reel-in compensates for the vertical drop that would otherwise put its feet
+    on the gap floor.  The landing length restores the crouched foot height on
+    the equal-height far platform.  Explicit lengths remain available.
     """
     attachment_height = max(float(attachment_pos[2] - box_top), 0.05)
     landing_attachment_z = (
@@ -1339,31 +1346,15 @@ class WireAssistWrapper:
           self.commanded_wire_length = actual_length
         else:
           if self.gap_crouch_command_target is None:
-            # Never reel in while both feet are planted.  A configured crouch
-            # length shorter than the measured standing length is unsafe, so
-            # clamp it and make that choice visible in the live log.
-            self.gap_crouch_command_target = max(
-              float(self.gap_crouch_wire_length),
-              actual_length,
-            )
             print(
-              "[WIRE] gap crouch armed: "
-              f"Lstand={actual_length:.3f}m "
-              f"Lcrouch={self.gap_crouch_command_target:.3f}m "
-              f"payout_rate={self.gap_crouch_wire_speed:.3f}m/s",
+              "[WIRE] gap crouch follows measured slack length; "
+              "no absolute payout wait",
               flush=True,
             )
-          # Pay out toward one explicit, experimentally adjustable crouch
-          # length.  It no longer chases noisy instantaneous body motion.
-          max_step = self.gap_crouch_wire_speed * self.dt
-          self.commanded_wire_length += float(
-            np.clip(
-              self.gap_crouch_command_target
-              - self.commanded_wire_length,
-              -max_step,
-              max_step,
-            )
-          )
+          # Follow crouch geometry with a slack command, then freeze the final
+          # measured length at LIFT.  Hoist/landing targets are computed there.
+          self.gap_crouch_command_target = actual_length
+          self.commanded_wire_length = actual_length
       else:
         # Other modes retain a slack cable while the standing policy settles.
         self.commanded_wire_length = actual_length
@@ -1550,25 +1541,51 @@ class WireAssistWrapper:
     length_error = actual_length - self.commanded_wire_length
     rate_error = self.filtered_wire_rate - commanded_rate
     vertical_fraction = max(cable[2] / actual_length, 0.05)
-    # A real cable cannot pull when its geometric length is shorter than the
-    # paid-out length.  Fade gravity support in only in a narrow band around
-    # the taut boundary; use one-sided extension/rate terms outside it.  The
-    # former unconditional gravity term was applying force to a slack cable
-    # and dragging the robot toward the anchor after it had already followed
-    # the line inward.
-    taut_scale = float(
-      np.clip(
-        (length_error + self.cable_taut_transition)
-        / max(self.cable_taut_transition, 1e-6),
-        0.0,
-        1.0,
+    gap_crouch_support = (
+      self.traversal_mode == "gap" and self.phase == self.PHASE_SETTLE
+    )
+    gap_swing = (
+      self.traversal_mode == "gap"
+      and self.phase in (self.PHASE_LIFT, self.PHASE_CROSS)
+    )
+    if gap_swing:
+      # Tarzan motion: keep the cable inextensible without cancelling gravity.
+      # For a body initially at rest on a cable, the radial gravity component
+      # is mg*u_z (not mg/u_z, which creates an excessive horizontal pull).
+      # Signed constraint terms suppress stretch/radial velocity while gravity's
+      # tangential component naturally drives the swing across the gap.
+      tension = (
+        self.robot_weight * vertical_fraction
+        + self.gap_constraint_kp * length_error
+        + self.gap_constraint_kd * rate_error
       )
-    )
-    tension = (
-      taut_scale * self.robot_weight / vertical_fraction
-      + self.constraint_kp * max(length_error, 0.0)
-      + self.constraint_kd * max(rate_error, 0.0)
-    )
+    elif not gap_crouch_support:
+      # Match the stable dev/g1_wire/dev/down hoist controller.  Gravity support
+      # is the feed-forward baseline; signed errors continuously add or remove
+      # tension around it.  The one-sided law made hoisting alternate between
+      # 0 and max tension whenever the body crossed Lcmd, exciting its radial
+      # mode.  Use this continuously during LIFT/HOLD/LOWER for every traversal.
+      tension = (
+        self.robot_weight / vertical_fraction
+        + self.constraint_kp * length_error
+        + self.constraint_kd * rate_error
+      )
+    else:
+      # During the gap SETTLE crouch, both feet remain planted and the far-side
+      # cable must act only as a one-sided fall arrester to avoid dragging them.
+      taut_scale = float(
+        np.clip(
+          (length_error + self.cable_taut_transition)
+          / max(self.cable_taut_transition, 1e-6),
+          0.0,
+          1.0,
+        )
+      )
+      tension = (
+        taut_scale * self.robot_weight / vertical_fraction
+        + self.constraint_kp * max(length_error, 0.0)
+        + self.constraint_kd * max(rate_error, 0.0)
+      )
 
     if self.phase == self.PHASE_SETTLE and self.traversal_mode == "gap":
       # Stay completely slack until the standing policy has stopped the robot.
@@ -1615,13 +1632,28 @@ class WireAssistWrapper:
     # Do not start the hold timer while the body is still flying through the
     # target.  Both cable length and radial speed must have settled.
     if self.phase == self.PHASE_LIFT:
-      length_settled = abs(length_error) <= self.hold_length_tolerance
+      # A descent body can swing inside the commanded cable-length sphere after
+      # its short preload.  The cable cannot push it back outward, so accept a
+      # settled undershoot; requiring |L-Lcmd| here left LIFT active forever.
+      length_settled = (
+        length_error <= self.hold_length_tolerance
+        if self.traversal_mode == "descend"
+        else abs(length_error) <= self.hold_length_tolerance
+      )
       rate_settled = abs(self.filtered_wire_rate) <= self.hold_rate_tolerance
       command_finished = self.commanded_wire_length <= self.target_wire_length + 1e-6
+      gap_crossed = (
+        self.traversal_mode != "gap"
+        or (
+          self.gap_swing_landing_x is not None
+          and attachment_pos[0] >= self.gap_swing_landing_x - 0.05
+        )
+      )
       if (
         command_finished
         and length_settled
         and rate_settled
+        and gap_crossed
         and self.wide_posture_ready
       ):
         self._set_phase(self.PHASE_CROSS)
@@ -1719,6 +1751,7 @@ class WireAssistWrapper:
     self.external_crouch_depth = 0.0
     self.gap_nominal_hoist_reel_in = None
     self.gap_nominal_payout = None
+    self.gap_swing_landing_x = None
     self.ascend_nominal_hoist_reel_in = None
     self.ascend_nominal_payout = None
     self.descent_nominal_landing_length = None
@@ -1775,17 +1808,43 @@ class WireAssistWrapper:
         self.lift_start_wire_length - float(self.commanded_wire_length),
         0.0,
       )
+      if self.traversal_mode == "gap" and self.wire_length is not None:
+        # The gap profile holds Lcmd during its preload ramp.  Detect the real
+        # cable shortening produced by that support force; otherwise the robot
+        # remains on the walking policy for the whole preload and is pulled off
+        # balance before the fixed suspension posture can engage.
+        reel_in_length = max(
+          reel_in_length,
+          self.lift_start_wire_length - float(self.wire_length),
+        )
       posture_lock_reel_in_length = (
         self.crouched_posture_lock_reel_in_length
         if self.external_crouch_policy
         else self.posture_lock_reel_in_length
       )
       posture_ready = reel_in_length >= posture_lock_reel_in_length
+      if self.traversal_mode == "gap":
+        # Like a human Tarzan takeoff, retain the locomotion policy until the
+        # attachment reaches the edge.  This supplies tangential launch speed;
+        # pulling a motionless, planted robot cannot start a clean pendulum arc.
+        gap_front, _, _, _ = self._obstacle_bounds()
+        posture_ready = attachment_pos[0] >= gap_front + 0.15
       if (
         not self.wide_posture_ready
         and posture_ready
       ):
         self.wide_posture_ready = True
+        if self.traversal_mode == "gap":
+          # Real joint/contact damping prevents the ideal pendulum from reaching
+          # its mirrored apex.  Keep fixed-length support until the attachment
+          # reaches the far platform edge instead of using a timer.
+          _, gap_back, _, _ = self._obstacle_bounds()
+          self.gap_swing_landing_x = gap_back
+          print(
+            "[WIRE] gap far-platform landing target: "
+            f"x={self.gap_swing_landing_x:.3f}m",
+            flush=True,
+          )
         print(
           f"[WIRE] support established "
           f"(reel_in={reel_in_length:.3f}m); "
@@ -1818,11 +1877,23 @@ class WireAssistWrapper:
     ):
       self._set_phase(self.PHASE_DONE)
     self._log_wire_state(attachment_pos, vz)
-    allow_forward = self.phase in (self.PHASE_APPROACH, self.PHASE_DONE)
+    gap_takeoff_walk = (
+      self.traversal_mode == "gap"
+      and self.phase == self.PHASE_LIFT
+      and not self.wide_posture_ready
+    )
+    allow_forward = (
+      self.phase in (self.PHASE_APPROACH, self.PHASE_DONE)
+      or gap_takeoff_walk
+    )
     forward_scale = (
-      min(self._phase_time() / self.walk_resume_ramp_time, 1.0)
-      if self.phase == self.PHASE_DONE
-      else 1.0
+      1.5
+      if gap_takeoff_walk
+      else (
+        min(self._phase_time() / self.walk_resume_ramp_time, 1.0)
+        if self.phase == self.PHASE_DONE
+        else 1.0
+      )
     )
     self._set_walking_command(
       yaw,
@@ -2169,6 +2240,27 @@ def run_play(task_id: str, cfg: PlayConfig):
   # capacity.  The observed minimum was 54, so reserve a comfortable margin.
   env_cfg.sim.nconmax = max(env_cfg.sim.nconmax or 0, 128)
 
+  if cfg.traversal_mode == "descend":
+    # The gap test's left platform starts exactly at the original step's back
+    # edge (x=3.2 m), unintentionally filling the descent landing area.  Remove
+    # only the gap platforms from the descend model; all step/anchor geometry
+    # and coordinates remain unchanged.
+    robot_cfg = env_cfg.scene.entities["robot"]
+    original_spec_fn = robot_cfg.spec_fn
+
+    def get_descend_field_spec():
+      spec = original_spec_fn()
+      for body in spec.worldbody.bodies:
+        if body.name not in ("gap_left_platform", "gap_right_platform"):
+          continue
+        for geom in body.geoms:
+          geom.contype = 0
+          geom.conaffinity = 0
+          geom.rgba = (0.0, 0.0, 0.0, 0.0)
+      return spec
+
+    robot_cfg.spec_fn = get_descend_field_spec
+
   render_mode = "rgb_array" if (TRAINED_MODE and cfg.video) else None
   env = ManagerBasedRlEnv(cfg=env_cfg, device=device, render_mode=render_mode)
   if use_crouch_policy and env.action_manager.total_action_dim != 29:
@@ -2184,10 +2276,10 @@ def run_play(task_id: str, cfg: PlayConfig):
   # length profile, fixed posture, spawn pose, and anchor placement differ.
   # =========================================================================
   anchor_pos = (
-    (3.45, 0.0, 2.4)
+    (3.42, 0.0, 2.4)  #降りるときのぽｓ
     if cfg.traversal_mode == "descend"
     else (
-      (7.7, 0.0, 4.0)  # 0.6 m beyond the 1.5 m gap landing edge.
+      (7.7, 0.0, 4.0)  # Far-side anchor supplies swing energy into the landing.
       if cfg.traversal_mode == "gap"
       else (2.3, 0.0, 2.4)
     )
