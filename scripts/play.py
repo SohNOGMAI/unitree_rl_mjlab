@@ -1565,6 +1565,7 @@ class WireAssistWrapper:
         self._set_phase(self.PHASE_ASSIST)
     if self.phase in (
       self.PHASE_APPROACH,
+      self.PHASE_SETTLE,
       self.PHASE_RELEASE,
       self.PHASE_DONE,
     ):
