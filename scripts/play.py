@@ -1999,6 +1999,10 @@ class PlayConfig:
   video_width: int | None = None
   camera: int | str | None = None
   viewer: Literal["auto", "native", "viser"] = "auto"
+  viewer_fps: float = 30.0
+  viewer_debug_vis: bool = False
+  viewer_shadows: bool = False
+  viewer_reflections: bool = False
   no_terminations: bool = False
 
   _demo_mode: tyro.conf.Suppress[bool] = False
@@ -2047,6 +2051,10 @@ def run_play(task_id: str, cfg: PlayConfig):
   if cfg.num_envs is not None: env_cfg.scene.num_envs = cfg.num_envs
   if cfg.video_height is not None: env_cfg.viewer.height = cfg.video_height
   if cfg.video_width is not None: env_cfg.viewer.width = cfg.video_width
+  env_cfg.viewer.enable_shadows = cfg.viewer_shadows
+  env_cfg.viewer.enable_reflections = cfg.viewer_reflections
+  if cfg.viewer_fps <= 0.0:
+    raise ValueError(f"viewer_fps must be positive, got {cfg.viewer_fps}")
 
   # Rule-based playback must be deterministic.  The training environment normally
   # randomizes x/y/yaw at every reset and resamples velocity commands every 3--8 s.
@@ -2198,7 +2206,26 @@ def run_play(task_id: str, cfg: PlayConfig):
   else:
     resolved_viewer = cfg.viewer
 
-  if resolved_viewer == "native": NativeMujocoViewer(env, policy).run()
+  print(
+    f"[VIEWER] backend={resolved_viewer} device={device} "
+    f"target_fps={cfg.viewer_fps:.0f} "
+    f"debug_vis={'ON' if cfg.viewer_debug_vis else 'OFF'} "
+    f"shadows={'ON' if cfg.viewer_shadows else 'OFF'} "
+    f"reflections={'ON' if cfg.viewer_reflections else 'OFF'}",
+    flush=True,
+  )
+  if resolved_viewer == "native":
+    native_viewer = NativeMujocoViewer(
+      env,
+      policy,
+      frame_rate=cfg.viewer_fps,
+    )
+    if not cfg.viewer_debug_vis:
+      # Velocity-command debug arrows copy several CUDA tensors to CPU on
+      # every rendered frame.  They are useful while debugging a policy but
+      # needlessly stall the normal wire-assist playback loop.
+      native_viewer.request_action("TOGGLE_DEBUG_VIS")
+    native_viewer.run()
   elif resolved_viewer == "viser": ViserPlayViewer(env, policy).run()
   else: raise RuntimeError(f"Unsupported viewer backend: {resolved_viewer}")
   env.close()
