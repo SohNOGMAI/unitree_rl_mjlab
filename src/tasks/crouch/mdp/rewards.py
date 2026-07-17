@@ -371,6 +371,41 @@ def planted_feet_cost(
   return torch.sum(speed_sq * in_contact, dim=1)
 
 
+class planted_foot_position_cost:
+  """Penalize displacement from each sole's position at episode reset.
+
+  A velocity-only cost can be defeated by taking one quick corrective step and
+  then standing still. This term keeps both soles at their original planar
+  contact locations throughout the complete crouch transition.
+  """
+
+  def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+    asset: Entity = env.scene[cfg.params["asset_cfg"].name]
+    self.asset = asset
+    self.site_ids = cfg.params["asset_cfg"].site_ids
+    if len(self.site_ids) != 2:
+      raise ValueError("Planted-foot position term requires exactly two sites")
+    self.reference_xy = asset.data.site_pos_w[:, self.site_ids, :2].clone()
+
+  def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
+    if env_ids is None:
+      env_ids = slice(None)
+    self.reference_xy[env_ids] = self.asset.data.site_pos_w[
+      env_ids, self.site_ids, :2
+    ]
+
+  def __call__(
+    self,
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg,
+  ) -> torch.Tensor:
+    del env, asset_cfg
+    displacement = (
+      self.asset.data.site_pos_w[:, self.site_ids, :2] - self.reference_xy
+    )
+    return torch.sum(torch.square(displacement), dim=(1, 2))
+
+
 def both_feet_contact(
   env: ManagerBasedRlEnv,
   sensor_name: str,

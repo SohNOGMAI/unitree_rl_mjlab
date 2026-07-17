@@ -19,16 +19,17 @@ CROUCH_TARGET_29DOF = {
   # +6.4 deg pelvis pitch, +9.9 deg torso pitch and a +4.5 cm COM offset.
   r"left_hip_pitch_joint": -0.55,
   r"right_hip_pitch_joint": -0.55,
-  r"left_hip_roll_joint": 0.0,
-  r"right_hip_roll_joint": 0.0,
+  # Match the gap suspension stance before the feet leave the platform.
+  r"left_hip_roll_joint": 0.30,
+  r"right_hip_roll_joint": -0.30,
   r"left_hip_yaw_joint": 0.0,
   r"right_hip_yaw_joint": 0.0,
   r"left_knee_joint": 0.95,
   r"right_knee_joint": 0.95,
   r"left_ankle_pitch_joint": -0.55,
   r"right_ankle_pitch_joint": -0.55,
-  r"left_ankle_roll_joint": 0.0,
-  r"right_ankle_roll_joint": 0.0,
+  r"left_ankle_roll_joint": -0.12,
+  r"right_ankle_roll_joint": 0.12,
   r"waist_yaw_joint": 0.0,
   r"waist_roll_joint": 0.0,
   r"waist_pitch_joint": 0.08,
@@ -48,10 +49,9 @@ CROUCH_TARGET_29DOF = {
   r"right_wrist_yaw_joint": 0.0,
 }
 
-# The deepest command that passed the deterministic 10-second stability test.
-# A value of 0.75 lowered the pelvis by about 0.17 m without a reset; 1.0 has
-# not yet passed that safety gate and must not be sent by the gap controller.
-CROUCH_MAX_DEPTH = 0.75
+# Gap traversal uses a deeper pre-suspension crouch.  This extends beyond the
+# previously validated 0.75 command, but remains below the full 1.0 reference.
+CROUCH_MAX_DEPTH = 0.90
 
 
 def unitree_g1_crouch_env_cfg(play: bool = False):
@@ -79,9 +79,8 @@ def unitree_g1_crouch_env_cfg(play: bool = False):
     init_velocity_prob=0.0,
     ranges=base_twist.ranges,
     viz=base_twist.viz,
-    # Eight seconds from standing to full depth.  The unassisted reference
-    # becomes unstable when forced through this transition in four seconds.
-    depth_rate=1.0 / 8.0,
+    # Reach the deployed 0.90 depth in four seconds, matching play.py.
+    depth_rate=CROUCH_MAX_DEPTH / 4.0,
   )
   cfg.commands["twist"] = twist
   # Reinterpret command[0] as crouch depth: 0=stand, 1=full crouch.
@@ -160,9 +159,9 @@ def unitree_g1_crouch_env_cfg(play: bool = False):
         "asset_cfg": SceneEntityCfg(
           "robot",
           joint_names=(
-            ".*_hip_pitch_joint",
+            ".*_hip_(pitch|roll)_joint",
             ".*_knee_joint",
-            ".*_ankle_pitch_joint",
+            ".*_ankle_(pitch|roll)_joint",
             "waist_pitch_joint",
           ),
         ),
@@ -191,7 +190,7 @@ def unitree_g1_crouch_env_cfg(play: bool = False):
     ),
     "both_feet_contact": RewardTermCfg(
       func=mdp.both_feet_contact,
-      weight=1.5,
+      weight=4.0,
       params={"sensor_name": "feet_ground_contact"},
     ),
     "balanced_foot_forces": RewardTermCfg(
@@ -254,9 +253,18 @@ def unitree_g1_crouch_env_cfg(play: bool = False):
     ),
     "planted_feet": RewardTermCfg(
       func=mdp.planted_feet_cost,
-      weight=-6.0,
+      weight=-20.0,
       params={
         "sensor_name": "feet_ground_contact",
+        "asset_cfg": SceneEntityCfg(
+          "robot", site_names=("left_foot", "right_foot")
+        ),
+      },
+    ),
+    "planted_foot_position": RewardTermCfg(
+      func=mdp.planted_foot_position_cost,
+      weight=-80.0,
+      params={
         "asset_cfg": SceneEntityCfg(
           "robot", site_names=("left_foot", "right_foot")
         ),

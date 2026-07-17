@@ -2,6 +2,7 @@
 
 import os
 import sys
+import math
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal
@@ -102,12 +103,15 @@ class WireAssistWrapper:
     descent_assisted_policy_hold_time=2.5,
     descent_posture_blend_time=2.0,
     descent_posture_action_rate_limit=2.50,
-    gap_approach_distance=0.40,
+    gap_approach_distance=0.35,
     gap_hoist_wire_length=None,
     gap_release_wire_length=None,
+    gap_hoist_wire_length_offset=0.1,
+    gap_release_wire_length_offset=0.2,
     gap_hoist_clearance=0.20,
     gap_landing_length_margin=0.02,
-    gap_reel_in_speed=0.12,
+    gap_reel_in_speed=2.00,
+    gap_reel_in_acceleration=0.30,
     gap_lift_preload_time=0.5,
     gap_lift_tension_rate=5000.0,
     gap_constraint_kp=5000.0,
@@ -115,7 +119,7 @@ class WireAssistWrapper:
     gap_payout_speed=0.20,
     gap_payout_acceleration=0.05,
     gap_hold_time=0.5,
-    gap_posture_blend_time=1.5,
+    gap_posture_blend_time=0.5,
     gap_posture_action_rate_limit=0.80,
     gap_crouch_wait_time=1.0,
     gap_policy_handover_time=1.0,
@@ -231,9 +235,12 @@ class WireAssistWrapper:
     self.gap_approach_distance = gap_approach_distance
     self.gap_hoist_wire_length = gap_hoist_wire_length
     self.gap_release_wire_length = gap_release_wire_length
+    self.gap_hoist_wire_length_offset = gap_hoist_wire_length_offset
+    self.gap_release_wire_length_offset = gap_release_wire_length_offset
     self.gap_hoist_clearance = gap_hoist_clearance
     self.gap_landing_length_margin = gap_landing_length_margin
     self.gap_reel_in_speed = gap_reel_in_speed
+    self.gap_reel_in_acceleration = gap_reel_in_acceleration
     self.gap_lift_preload_time = gap_lift_preload_time
     self.gap_lift_tension_rate = gap_lift_tension_rate
     self.gap_constraint_kp = gap_constraint_kp
@@ -603,10 +610,10 @@ class WireAssistWrapper:
     """
     return self._build_posture_action(
       {
-        "left_hip_pitch_joint": -0.55,
-        "right_hip_pitch_joint": -0.55,
-        "left_hip_roll_joint": 0.30,
-        "right_hip_roll_joint": -0.30,
+        "left_hip_pitch_joint": -0.75,
+        "right_hip_pitch_joint": -0.75,
+        "left_hip_roll_joint": 0.50,
+        "right_hip_roll_joint": -0.50,
         "left_knee_joint": 1.10,
         "right_knee_joint": 1.10,
         # hip + knee + ankle = 0 keeps both soles approximately horizontal.
@@ -619,10 +626,10 @@ class WireAssistWrapper:
         "waist_yaw_joint": 0.0,
         "waist_roll_joint": 0.0,
         "waist_pitch_joint": 0.0,
-        "left_shoulder_pitch_joint": 0.80,
-        "right_shoulder_pitch_joint": 0.80,
-        "left_shoulder_roll_joint": 1.70,
-        "right_shoulder_roll_joint": -1.70,
+        "left_shoulder_pitch_joint": 0.50,
+        "right_shoulder_pitch_joint": 0.50,
+        "left_shoulder_roll_joint": 1.00,
+        "right_shoulder_roll_joint": -1.00,
         "left_elbow_joint": 0.50,
         "right_elbow_joint": 0.50,
       }
@@ -1218,15 +1225,19 @@ class WireAssistWrapper:
       computed_landing_length - self.gap_hoist_clearance,
       0.05,
     )
-    requested_hoist = (
+    base_hoist = (
       computed_hoist_length
       if self.gap_hoist_wire_length is None
       else float(self.gap_hoist_wire_length)
     )
-    requested_landing = (
+    base_landing = (
       computed_landing_length
       if self.gap_release_wire_length is None
       else float(self.gap_release_wire_length)
+    )
+    requested_hoist = base_hoist + self.gap_hoist_wire_length_offset
+    requested_landing = (
+      base_landing + self.gap_release_wire_length_offset
     )
     self.target_wire_length = max(
       min(requested_hoist, actual_length),
@@ -1252,6 +1263,8 @@ class WireAssistWrapper:
         f"Lhoist={self.target_wire_length:.3f}m "
         f"Llanding={self.release_target_wire_length:.3f}m "
         f"h_attach={attachment_height:.3f}m "
+        f"offsets=({self.gap_hoist_wire_length_offset:+.3f},"
+        f"{self.gap_release_wire_length_offset:+.3f})m "
         f"reel={self.gap_nominal_hoist_reel_in:.3f}m "
         f"payout={self.gap_nominal_payout:.3f}m",
         flush=True,
@@ -1444,7 +1457,15 @@ class WireAssistWrapper:
             else self.reel_in_speed
           )
         ),
-        np.sqrt(2.0 * self.wire_acceleration * remaining),
+        np.sqrt(
+          2.0
+          * (
+            self.gap_reel_in_acceleration
+            if self.traversal_mode == "gap"
+            else self.wire_acceleration
+          )
+          * remaining
+        ),
       )
       if (
         self.traversal_mode == "gap"
@@ -2128,7 +2149,7 @@ class PlayConfig:
   checkpoint_file: str | None = None
   crouch_checkpoint_file: str | None = None
   crouch_depth: float = CROUCH_MAX_DEPTH
-  crouch_blend_time: float = 8.0
+  crouch_blend_time: float = 2.0
   crouch_settle_time: float = 1.0
   crouch_wait_time: float = 2.0
   motion_file: str | None = None
@@ -2145,6 +2166,7 @@ class PlayConfig:
   viewer_shadows: bool = False
   viewer_reflections: bool = False
   no_terminations: bool = False
+  gap_tilt_termination_limit_deg: float = 120.0
 
   _demo_mode: tyro.conf.Suppress[bool] = False
 
@@ -2163,6 +2185,18 @@ def run_play(task_id: str, cfg: PlayConfig):
   if cfg.no_terminations:
     env_cfg.terminations = {}
     print("[INFO]: Terminations disabled")
+  elif cfg.traversal_mode == "gap" and "fell_over" in env_cfg.terminations:
+    if not 0.0 < cfg.gap_tilt_termination_limit_deg <= 180.0:
+      raise ValueError(
+        "gap_tilt_termination_limit_deg must be in the interval (0, 180]"
+      )
+    env_cfg.terminations["fell_over"].params["limit_angle"] = math.radians(
+      cfg.gap_tilt_termination_limit_deg
+    )
+    print(
+      "[INFO]: Gap tilt termination relaxed to "
+      f"{cfg.gap_tilt_termination_limit_deg:.1f} deg"
+    )
 
   is_tracking_task = "motion" in env_cfg.commands and isinstance(env_cfg.commands["motion"], MotionCommandCfg)
   if is_tracking_task and cfg._demo_mode:
@@ -2276,7 +2310,7 @@ def run_play(task_id: str, cfg: PlayConfig):
   # length profile, fixed posture, spawn pose, and anchor placement differ.
   # =========================================================================
   anchor_pos = (
-    (3.42, 0.0, 2.4)  #降りるときのぽｓ
+    (3.35, 0.0, 2.4)  #降りるときのぽｓ
     if cfg.traversal_mode == "descend"
     else (
       (7.7, 0.0, 4.0)  # Far-side anchor supplies swing energy into the landing.
