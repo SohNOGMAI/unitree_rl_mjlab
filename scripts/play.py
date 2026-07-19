@@ -15,10 +15,12 @@ import numpy as np
 from scipy.spatial.transform import Rotation as R
 
 from src.tasks.crouch.config.g1.env_cfgs import (
+  CROUCH_ACTION_REFERENCE_29DOF,
   CROUCH_MAX_DEPTH,
-  CROUCH_TARGET_29DOF,
 )
+from src.tasks.crouch.mdp.terminations import root_height_below
 from mjlab.envs import ManagerBasedRlEnv
+from mjlab.managers.termination_manager import TerminationTermCfg
 from mjlab.rl import MjlabOnPolicyRunner, RslRlVecEnvWrapper
 from mjlab.tasks.registry import list_tasks, load_env_cfg, load_rl_cfg, load_runner_cls
 from mjlab.tasks.tracking.mdp import MotionCommandCfg
@@ -103,10 +105,10 @@ class WireAssistWrapper:
     descent_assisted_policy_hold_time=2.5,
     descent_posture_blend_time=2.0,
     descent_posture_action_rate_limit=2.50,
-    gap_approach_distance=0.35,
+    gap_approach_distance=0.50,
     gap_hoist_wire_length=None,
     gap_release_wire_length=None,
-    gap_hoist_wire_length_offset=0.1,
+    gap_hoist_wire_length_offset=0.3,
     gap_release_wire_length_offset=0.2,
     gap_hoist_clearance=0.20,
     gap_landing_length_margin=0.02,
@@ -118,13 +120,17 @@ class WireAssistWrapper:
     gap_constraint_kd=1000.0,
     gap_payout_speed=0.20,
     gap_payout_acceleration=0.05,
-    gap_hold_time=0.5,
-    gap_posture_blend_time=0.5,
-    gap_posture_action_rate_limit=0.80,
+    gap_hold_time=0.3,
+    gap_posture_blend_time=1.0,
+    gap_posture_action_rate_limit=0.35,
     gap_crouch_wait_time=1.0,
     gap_policy_handover_time=1.0,
-    gap_crouch_blend_time=2.0, #syagamujikan
-    gap_crouch_settle_time=1.0,
+    gap_crouch_blend_time=4.0, #syagamujikan
+    gap_crouch_settle_time=0.5,
+    gap_crouch_stability_time=0.75,
+    gap_crouch_max_yaw_rate=np.deg2rad(8.0),
+    gap_crouch_max_roll=np.deg2rad(8.0),
+    gap_crouch_max_vertical_speed=0.08,
     gap_crouch_depth=CROUCH_MAX_DEPTH,
     gap_crouch_action_rate_limit=0.25,
     gap_crouch_wire_length=3.15,
@@ -254,6 +260,10 @@ class WireAssistWrapper:
     self.gap_policy_handover_time = gap_policy_handover_time
     self.gap_crouch_blend_time = gap_crouch_blend_time
     self.gap_crouch_settle_time = gap_crouch_settle_time
+    self.gap_crouch_stability_time = gap_crouch_stability_time
+    self.gap_crouch_max_yaw_rate = gap_crouch_max_yaw_rate
+    self.gap_crouch_max_roll = gap_crouch_max_roll
+    self.gap_crouch_max_vertical_speed = gap_crouch_max_vertical_speed
     self.gap_crouch_depth = float(
       np.clip(gap_crouch_depth, 0.0, CROUCH_MAX_DEPTH)
     )
@@ -397,10 +407,14 @@ class WireAssistWrapper:
     self.waist_action_indices = []
     self.brace_action_indices = []
     self.gap_crouch_action_indices = []
+    self.gap_leg_action_indices = []
+    self.gap_hip_roll_action_indices = {}
+    self.joint_action_term = None
     action_manager = getattr(self.env.unwrapped, "action_manager", None)
     if action_manager is not None:
       try:
         joint_term = action_manager.get_term("joint_pos")
+        self.joint_action_term = joint_term
         self.waist_action_indices = [
           index
           for index, name in enumerate(joint_term.target_names)
@@ -435,6 +449,32 @@ class WireAssistWrapper:
             )
           )
         ]
+        self.gap_leg_action_indices = [
+          index
+          for index, name in enumerate(joint_term.target_names)
+          if any(
+            name.endswith(suffix)
+            for suffix in (
+              "hip_pitch_joint",
+              "hip_roll_joint",
+              "hip_yaw_joint",
+              "knee_joint",
+              "ankle_pitch_joint",
+              "ankle_roll_joint",
+            )
+          )
+        ]
+        self.gap_hip_roll_action_indices = {
+          side: next(
+            (
+              index
+              for index, name in enumerate(joint_term.target_names)
+              if name.endswith(f"{side}_hip_roll_joint")
+            ),
+            None,
+          )
+          for side in ("left", "right")
+        }
       except (KeyError, AttributeError):
         pass
     print(
@@ -457,6 +497,7 @@ class WireAssistWrapper:
     self.gap_crouch_command_target = None
     self.external_crouch_blend = 0.0
     self.external_crouch_depth = 0.0
+    self.gap_crouch_stable_steps = 0
     self.gap_nominal_hoist_reel_in = None
     self.gap_nominal_payout = None
     self.gap_swing_landing_x = None
@@ -742,6 +783,23 @@ class WireAssistWrapper:
       target[:, indices] - previous[:, indices], -max_delta, max_delta
     )
     return limited
+
+  def _measured_joint_action(self, reference):
+    """Convert the current measured joints to normalized action coordinates."""
+    term = self.joint_action_term
+    if term is None:
+      return reference.detach().clone()
+    joint_pos = self.robot_entity.data.joint_pos[:, term.target_ids].to(
+      device=reference.device,
+      dtype=reference.dtype,
+    )
+    offset = term.offset
+    scale = term.scale
+    if isinstance(offset, torch.Tensor):
+      offset = offset.to(device=reference.device, dtype=reference.dtype)
+    if isinstance(scale, torch.Tensor):
+      scale = scale.to(device=reference.device, dtype=reference.dtype)
+    return (joint_pos - offset) / scale
 
   def _first_box_geom(self, body_id):
     for geom_id in range(self.native_model.ngeom):
@@ -1407,10 +1465,40 @@ class WireAssistWrapper:
         ) <= self.wire_length_tolerance
       )
     )
+    gap_crouch_stable = True
+    if self.phase == self.PHASE_SETTLE and self.traversal_mode == "gap":
+      stability_window_open = (
+        self._phase_time() >= pre_lift_time and crouch_wire_ready
+      )
+      instantaneously_stable = (
+        abs(self.filtered_yaw_rate) <= self.gap_crouch_max_yaw_rate
+        and abs(self.torso_roll) <= self.gap_crouch_max_roll
+        and abs(self.filtered_lift_velocity)
+        <= self.gap_crouch_max_vertical_speed
+        and abs(self.filtered_wire_rate)
+        <= self.gap_crouch_max_vertical_speed
+      )
+      if stability_window_open and instantaneously_stable:
+        self.gap_crouch_stable_steps += 1
+      else:
+        self.gap_crouch_stable_steps = 0
+      required_stable_steps = max(
+        int(np.ceil(self.gap_crouch_stability_time / self.dt)), 1
+      )
+      gap_crouch_stable = (
+        self.gap_crouch_stable_steps >= required_stable_steps
+      )
+      if self.gap_crouch_stable_steps == required_stable_steps:
+        print(
+          "[WIRE] crouch stable; hoist transition enabled "
+          f"({self.gap_crouch_stability_time:.2f}s continuous)",
+          flush=True,
+        )
     if (
       self.phase == self.PHASE_SETTLE
       and self._phase_time() >= pre_lift_time
       and crouch_wire_ready
+      and gap_crouch_stable
     ):
       # Use the measured taut length as the new LIFT datum.  This removes the
       # small fall-arrester extension that can accumulate during SETTLE.
@@ -1770,6 +1858,7 @@ class WireAssistWrapper:
     self.gap_crouch_command_target = None
     self.external_crouch_blend = 0.0
     self.external_crouch_depth = 0.0
+    self.gap_crouch_stable_steps = 0
     self.gap_nominal_hoist_reel_in = None
     self.gap_nominal_payout = None
     self.gap_swing_landing_x = None
@@ -1959,6 +2048,25 @@ class WireAssistWrapper:
         if self.last_applied_action is not None
         else action.detach().clone()
       )
+      if (
+        desired_posture_mode == "gap_suspension"
+        and self.gap_leg_action_indices
+      ):
+        # The crouch actor's last command is not the same as the measured
+        # joint pose because the loaded legs lag their PD targets.  Starting a
+        # new interpolation from that stale command retains an outward hip-roll
+        # torque and causes the conspicuous one-time over-opening at takeoff.
+        # Zero that stored position error for the legs, then ramp gently from
+        # the actual pose to the suspension target.
+        measured_action = self._measured_joint_action(action)
+        leg_ids = self.gap_leg_action_indices
+        self.posture_lock_start_action[:, leg_ids] = measured_action[:, leg_ids]
+        if self.last_applied_action is not None:
+          self.last_applied_action[:, leg_ids] = measured_action[:, leg_ids]
+        print(
+          "[WIRE] gap posture transition starts from measured leg pose",
+          flush=True,
+        )
       if desired_posture_mode == "gap_crouch":
         # Start from the policy's stable edge stance.  Change only the coupled
         # hip/knee/ankle sagittal chain (and symmetric shoulder pitch already
@@ -2004,6 +2112,27 @@ class WireAssistWrapper:
       action = self._rate_limit_action(
         action, self.last_applied_action, action_rate_limit
       )
+      if (
+        desired_posture_mode == "gap_suspension"
+        and self.gap_posture_action is not None
+      ):
+        # Never command a stance wider than the final fixed posture.  This is
+        # a command-space guard in addition to the slower measured-pose blend;
+        # it prevents residual crouch corrections from being carried outward.
+        gap_target = self.gap_posture_action.to(
+          device=action.device,
+          dtype=action.dtype,
+        )
+        left_id = self.gap_hip_roll_action_indices.get("left")
+        right_id = self.gap_hip_roll_action_indices.get("right")
+        if left_id is not None:
+          action[:, left_id] = torch.minimum(
+            action[:, left_id], gap_target[:, left_id]
+          )
+        if right_id is not None:
+          action[:, right_id] = torch.maximum(
+            action[:, right_id], gap_target[:, right_id]
+          )
     elif self.phase == self.PHASE_ASSIST:
       if self.posture_mode != "assist_policy_blend":
         self.posture_mode = "assist_policy_blend"
@@ -2088,11 +2217,12 @@ class WalkingCrouchPolicy:
     self.wire_env = wire_env
     action_term = wire_env.env.action_manager.get_term("joint_pos")
     robot = wire_env.env.scene["robot"]
+    self.robot = robot
     target = robot.data.default_joint_pos[:, action_term.target_ids].clone()
     for action_id, name in enumerate(action_term.target_names):
-      if name not in CROUCH_TARGET_29DOF:
+      if name not in CROUCH_ACTION_REFERENCE_29DOF:
         raise ValueError(f"29-DoF crouch target is missing joint {name!r}")
-      target[:, action_id] = CROUCH_TARGET_29DOF[name]
+      target[:, action_id] = CROUCH_ACTION_REFERENCE_29DOF[name]
     scale = action_term.scale
     if not isinstance(scale, torch.Tensor):
       scale = torch.full_like(target, float(scale))
@@ -2101,21 +2231,47 @@ class WalkingCrouchPolicy:
     self.crouch_reference_action = (
       target - robot.data.default_joint_pos[:, action_term.target_ids]
     ) / scale
-    self.previous_crouch_reference_action = torch.zeros_like(
+    self.crouch_locked_action_indices = [
+      index
+      for index, name in enumerate(action_term.target_names)
+      if name.endswith(
+        ("hip_roll_joint", "ankle_roll_joint")
+      )
+    ]
+    self.crouch_always_locked_action_indices = [
+      index
+      for index, name in enumerate(action_term.target_names)
+      if name.endswith("waist_yaw_joint")
+    ]
+    self.previous_crouch_residual_action = torch.zeros_like(
       self.crouch_reference_action
+    )
+    self.crouch_reference_x = None
+    self.crouch_reference_yaw = None
+
+  @staticmethod
+  def _yaw_from_quat(quat):
+    w, x, y, z = quat.unbind(dim=-1)
+    return torch.atan2(
+      2.0 * (w * z + x * y),
+      1.0 - 2.0 * (y * y + z * z),
     )
 
   def __call__(self, obs):
     walking_action = self.walking_policy(obs)
     blend, crouch_depth = self.wire_env.crouch_policy_schedule()
     if blend <= 0.0:
-      self.previous_crouch_reference_action.zero_()
+      self.previous_crouch_residual_action.zero_()
+      self.crouch_reference_x = self.robot.data.root_link_pos_w[..., 0].clone()
+      self.crouch_reference_yaw = self._yaw_from_quat(
+        self.robot.data.root_link_quat_w
+      ).clone()
       return walking_action
 
-    # Both actors deliberately retain the 98-D walking observation interface:
-    # [ang vel 3, gravity 3, command 3, gait phase 2, ...].  Only the crouch
-    # actor's private copy is changed, so the walking actor still sees the
-    # rule-based zero-velocity command managed by WireAssistWrapper.
+    # Both actors deliberately retain the 98-D walking observation interface.
+    # In the crouch actor's private copy, the legacy gait-phase slots carry
+    # scaled planar base velocity so it can arrest drift during the hold.  The
+    # walking actor still sees the regular command/phase observations.
     crouch_obs = obs.clone()
     actor_obs = crouch_obs["actor"].clone()
     if actor_obs.shape[-1] != 98:
@@ -2124,22 +2280,64 @@ class WalkingCrouchPolicy:
         f"got {actor_obs.shape[-1]}"
       )
     actor_obs[..., 6] = crouch_depth * self.CROUCH_OBSERVATION_SCALE
-    actor_obs[..., 7:9] = 0.0
-    actor_obs[..., 9:11] = 0.0
-    # Training's custom action term adds the crouch reference after the raw
-    # action has been stored, so its observation[69:98] contains residuals.
-    # The regular walking environment stores the already combined action.
-    # Remove the previous reference here to keep the actor input identical.
-    actor_obs[..., 69:98] -= self.previous_crouch_reference_action
+    if self.crouch_reference_x is None or self.crouch_reference_yaw is None:
+      self.crouch_reference_x = self.robot.data.root_link_pos_w[..., 0].clone()
+      self.crouch_reference_yaw = self._yaw_from_quat(
+        self.robot.data.root_link_quat_w
+      ).clone()
+    actor_obs[..., 7] = 2.0 * (
+      self.robot.data.root_link_pos_w[..., 0] - self.crouch_reference_x
+    )
+    current_yaw = self._yaw_from_quat(self.robot.data.root_link_quat_w)
+    actor_obs[..., 8] = torch.atan2(
+      torch.sin(current_yaw - self.crouch_reference_yaw),
+      torch.cos(current_yaw - self.crouch_reference_yaw),
+    )
+    actor_obs[..., 9:11] = 0.2 * self.robot.data.root_link_lin_vel_b[..., :2]
+    # Training observes the crouch actor's previous *residual* action.  During
+    # walking/crouch handover the regular environment instead stores the
+    # blended physical command.  Subtracting a reference from that blend still
+    # leaves a large walking-policy component and drove the crouch actor far
+    # outside its training distribution (most visibly as waist-yaw drift).
+    # Keep an independent residual-action history for the crouch actor.
+    actor_obs[..., 69:98] = self.previous_crouch_residual_action
     crouch_obs.set("actor", actor_obs)
     crouch_action = self.crouch_policy(crouch_obs)
+    # Training's action observation contains the actor's raw residual, before
+    # the action term attenuates hip/ankle-roll residuals.  Preserve that exact
+    # recurrence here; feeding the attenuated action back shifts the deployed
+    # actor outside its training distribution.
+    self.previous_crouch_residual_action.copy_(crouch_action.detach())
     # The crouch task trains residual actions around a command-interpolated
     # reference.  Playback uses the regular walking action manager, so add the
     # same reference in normalized action space before blending policies.
     reference_action = crouch_depth * self.crouch_reference_action
-    crouch_action = crouch_action + reference_action
-    self.previous_crouch_reference_action.copy_(reference_action.detach())
-    return (1.0 - blend) * walking_action + blend * crouch_action
+    residual_lock = float(np.clip(crouch_depth / 0.75, 0.0, 1.0))
+    crouch_action[..., self.crouch_locked_action_indices] *= (
+      1.0 - residual_lock * 0.80
+    )
+    # Match training exactly: crouch balance must not inject a waist-yaw
+    # residual.  The zero nominal target lets the joint PD hold the torso
+    # straight while hips and ankles handle support-polygon corrections.
+    crouch_action[..., self.crouch_always_locked_action_indices] = 0.0
+    crouch_command = crouch_action + reference_action
+    # A separately fine-tuned actor is not guaranteed to reproduce the
+    # walking actor at a zero crouch command.  Blending it in completely while
+    # depth is still zero caused the observed backward collapse before the
+    # robot had even started crouching.  Make the correction vanish exactly at
+    # depth zero and grow with the commanded crouch depth.  The original
+    # standing controller therefore remains continuous at handover.
+    # Finish the walking-to-crouch handover while the depth command is still
+    # zero.  At the instant crouching begins the crouch actor then has full
+    # authority, exactly as in its training environment.
+    effective_blend = blend
+    # Report the blend that is actually applied, rather than the actor warm-up
+    # blend returned by the scheduler.
+    self.wire_env.external_crouch_blend = effective_blend
+    return (
+      (1.0 - effective_blend) * walking_action
+      + effective_blend * crouch_command
+    )
 
 
 @dataclass(frozen=True)
@@ -2147,11 +2345,17 @@ class PlayConfig:
   agent: Literal["zero", "random", "trained"] = "trained"
   traversal_mode: Literal["ascend", "descend", "gap"] = "gap"
   checkpoint_file: str | None = None
-  crouch_checkpoint_file: str | None = None
+  crouch_checkpoint_file: str | None = (
+    "logs/rsl_rl/g1_crouch/"
+    "2026-07-19_11-51-25_gap_planted_no_yaw_s24/model_675.pt"
+  )
   crouch_depth: float = CROUCH_MAX_DEPTH
-  crouch_blend_time: float = 2.0
+  # Start crouching soon after braking at the edge, then hold the completed
+  # crouch briefly before hoisting so the torso/feet settle first.
+  crouch_policy_handover_time: float = 2.0
+  crouch_blend_time: float = 4.0
   crouch_settle_time: float = 1.0
-  crouch_wait_time: float = 2.0
+  crouch_wait_time: float = 0.3
   motion_file: str | None = None
   num_envs: int | None = None
   device: str | None = None
@@ -2165,8 +2369,11 @@ class PlayConfig:
   viewer_debug_vis: bool = False
   viewer_shadows: bool = False
   viewer_reflections: bool = False
-  no_terminations: bool = False
-  gap_tilt_termination_limit_deg: float = 120.0
+  # Playback is a rule-based traversal experiment: keep the same episode
+  # running even after a fall so the wire controller and recovery sequence can
+  # be observed instead of immediately resetting the simulation.
+  no_terminations: bool = True
+  gap_tilt_termination_limit_deg: float = 50.0
 
   _demo_mode: tyro.conf.Suppress[bool] = False
 
@@ -2194,8 +2401,14 @@ def run_play(task_id: str, cfg: PlayConfig):
       cfg.gap_tilt_termination_limit_deg
     )
     print(
-      "[INFO]: Gap tilt termination relaxed to "
+      "[INFO]: Gap tilt termination set to "
       f"{cfg.gap_tilt_termination_limit_deg:.1f} deg"
+    )
+    # The velocity task has no low-height termination.  Add one for gap mode
+    # so a collapsed crouch cannot continue through LIFT/HOLD as a success.
+    env_cfg.terminations["root_too_low"] = TerminationTermCfg(
+      func=root_height_below,
+      params={"minimum_height": 1.00},
     )
 
   is_tracking_task = "motion" in env_cfg.commands and isinstance(env_cfg.commands["motion"], MotionCommandCfg)
@@ -2232,6 +2445,16 @@ def run_play(task_id: str, cfg: PlayConfig):
 
   # Rule-based playback must be deterministic.  The training environment normally
   # randomizes x/y/yaw at every reset and resamples velocity commands every 3--8 s.
+  # Startup/reset domain randomization must also be removed: otherwise every
+  # viewer launch samples different friction, encoder bias and body COM, so a
+  # nominally identical crouch can pass once and collapse on the next run.
+  for event_name in (
+    "randomize_terrain",
+    "foot_friction",
+    "encoder_bias",
+    "base_com",
+  ):
+    env_cfg.events.pop(event_name, None)
   reset_base = env_cfg.events.get("reset_base")
   if reset_base is not None:
     pose_range = reset_base.params.setdefault("pose_range", {})
@@ -2313,7 +2536,7 @@ def run_play(task_id: str, cfg: PlayConfig):
     (3.35, 0.0, 2.4)  #降りるときのぽｓ
     if cfg.traversal_mode == "descend"
     else (
-      (7.7, 0.0, 4.0)  # Far-side anchor supplies swing energy into the landing.
+      (7.8, 0.0, 4.0)  # Far-side anchor supplies swing energy into the landing.
       if cfg.traversal_mode == "gap"
       else (2.3, 0.0, 2.4)
     )
@@ -2334,7 +2557,12 @@ def run_play(task_id: str, cfg: PlayConfig):
       else ("obstacle_box", "obstacle", "wall_front")
     ),
     lin_vel_x=walk_speed,
+    # Gap playback starts exactly on y=0 and the anchor is also on y=0.
+    # Lateral velocity feedback only excites a side-to-side walking lean here.
+    lateral_position_kp=0.0 if cfg.traversal_mode == "gap" else 0.8,
+    max_lateral_speed=0.0 if cfg.traversal_mode == "gap" else 0.25,
     gap_crouch_wait_time=cfg.crouch_wait_time,
+    gap_policy_handover_time=cfg.crouch_policy_handover_time,
     gap_crouch_blend_time=cfg.crouch_blend_time,
     gap_crouch_settle_time=cfg.crouch_settle_time,
     gap_crouch_depth=cfg.crouch_depth,
