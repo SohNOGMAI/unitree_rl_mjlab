@@ -87,6 +87,8 @@ class WireAssistWrapper:
     max_reel_in=1.00,
     hoist_target_wire_length=0.63,
     release_target_wire_length=0.90,
+    ascend_hoist_reel_in_length=None,
+    ascend_release_payout_length=None,
     winch_kp=1500.0,
 
     winch_kd=120.0,
@@ -98,6 +100,8 @@ class WireAssistWrapper:
     descent_preload_reel_in=0.05, # Preload the wire by this amount before descent to reduce slack and avoid snagging.
     descent_release_wire_length=None,
     descent_landing_length_margin=0.15,
+    descent_hoist_reel_in_length=None,
+    descent_release_payout_length=None,
     descent_reel_in_speed=0.05,
     descent_payout_speed=0.50,
     descent_payout_acceleration=0.04,
@@ -112,6 +116,8 @@ class WireAssistWrapper:
     gap_release_wire_length_offset=0.2,
     gap_hoist_clearance=0.20,
     gap_landing_length_margin=0.02,
+    gap_hoist_reel_in_length=None,
+    gap_release_payout_length=None,
     gap_reel_in_speed=2.00,
     gap_reel_in_acceleration=0.30,
     gap_lift_preload_time=0.5,
@@ -217,6 +223,8 @@ class WireAssistWrapper:
     self.max_reel_in = max_reel_in
     self.hoist_target_wire_length = hoist_target_wire_length
     self.configured_release_target_wire_length = release_target_wire_length
+    self.ascend_hoist_reel_in_length = ascend_hoist_reel_in_length
+    self.ascend_release_payout_length = ascend_release_payout_length
     self.winch_kp = winch_kp
     self.winch_kd = winch_kd
     self.constraint_kp = constraint_kp
@@ -227,6 +235,8 @@ class WireAssistWrapper:
     self.descent_preload_reel_in = descent_preload_reel_in
     self.descent_release_wire_length = descent_release_wire_length
     self.descent_landing_length_margin = descent_landing_length_margin
+    self.descent_hoist_reel_in_length = descent_hoist_reel_in_length
+    self.descent_release_payout_length = descent_release_payout_length
     self.descent_reel_in_speed = descent_reel_in_speed
     self.descent_payout_speed = descent_payout_speed
     self.descent_payout_acceleration = descent_payout_acceleration
@@ -245,6 +255,8 @@ class WireAssistWrapper:
     self.gap_release_wire_length_offset = gap_release_wire_length_offset
     self.gap_hoist_clearance = gap_hoist_clearance
     self.gap_landing_length_margin = gap_landing_length_margin
+    self.gap_hoist_reel_in_length = gap_hoist_reel_in_length
+    self.gap_release_payout_length = gap_release_payout_length
     self.gap_reel_in_speed = gap_reel_in_speed
     self.gap_reel_in_acceleration = gap_reel_in_acceleration
     self.gap_lift_preload_time = gap_lift_preload_time
@@ -1169,37 +1181,56 @@ class WireAssistWrapper:
     announce=False,
     from_crouch=False,
   ):
-    """Update preload from the crouch while preserving the landing geometry."""
+    """Configure descend as L_hoist = L_start - reel, L_release = L_hoist + payout."""
+    if self.descent_hoist_reel_in_length is None:
+      hoist_reel_in = max(float(self.descent_preload_reel_in), 0.0)
+    else:
+      hoist_reel_in = max(float(self.descent_hoist_reel_in_length), 0.0)
     self.target_wire_length = max(
-      actual_length - self.descent_preload_reel_in,
+      actual_length - hoist_reel_in,
       0.05,
     )
-    attachment_height_above_support = max(
-      attachment_pos[2] - box_top,
-      0.0,
-    )
-    ground_attachment_z = box_bottom + attachment_height_above_support
-    computed_landing_length = (
-      self.anchor_pos[2]
-      - ground_attachment_z
-      + self.descent_landing_length_margin
-    )
-    if not from_crouch or self.descent_nominal_landing_length is None:
+    if (
+      self.descent_release_payout_length is not None
+      or not from_crouch
+      or self.descent_nominal_landing_length is None
+    ):
+      if self.descent_release_payout_length is None:
+        attachment_height_above_support = max(
+          attachment_pos[2] - box_top,
+          0.0,
+        )
+        ground_attachment_z = box_bottom + attachment_height_above_support
+        computed_landing_length = (
+          self.anchor_pos[2]
+          - ground_attachment_z
+          + self.descent_landing_length_margin
+        )
+        landing_length = (
+          computed_landing_length
+          if self.descent_release_wire_length is None
+          else float(self.descent_release_wire_length)
+        )
+        release_payout = max(landing_length - self.target_wire_length, 0.0)
+      else:
+        release_payout = max(float(self.descent_release_payout_length), 0.0)
       self.descent_nominal_landing_length = (
-        computed_landing_length
-        if self.descent_release_wire_length is None
-        else float(self.descent_release_wire_length)
+        self.target_wire_length + release_payout
       )
     self.release_target_wire_length = max(
       self.descent_nominal_landing_length,
       self.target_wire_length,
     )
     if announce:
+      release_payout = self.release_target_wire_length - self.target_wire_length
       print(
         "[WIRE] descent profile armed"
         f" ({'crouched' if from_crouch else 'standing'} geometry): "
-        f"Lpreload={self.target_wire_length:.3f}m "
-        f"Llanding={self.release_target_wire_length:.3f}m",
+        f"Lstart={actual_length:.3f}m "
+        f"Lhoist={self.target_wire_length:.3f}m "
+        f"Lrelease={self.release_target_wire_length:.3f}m "
+        f"inputs=(reel={hoist_reel_in:.3f}m, "
+        f"payout={release_payout:.3f}m)",
         flush=True,
       )
 
@@ -1209,32 +1240,45 @@ class WireAssistWrapper:
     announce=False,
     from_crouch=False,
   ):
-    """Preserve the standing reel/payout travel after crouching.
+    """Configure the ascend cable-length profile as one geometric solution.
 
-    Crouching lowers the rear attachment and changes its geometric distance to
-    the ceiling anchor.  The traversal objective is the amount reeled in, not
-    one world-specific absolute cable length, so measure that travel in the
-    standing pose and apply it again from the crouched cable length.
+    The robust quantity is the cable travel, not one absolute length measured
+    in a single posture.  The standing/crouched datum may change, so define the
+    profile as ``L_hoist = L_start - reel`` and
+    ``L_release = L_hoist + payout``.  For backward compatibility, the current
+    successful absolute lengths are converted into these travels when explicit
+    travel inputs are not supplied.
     """
     if (
       not from_crouch
       or self.ascend_nominal_hoist_reel_in is None
       or self.ascend_nominal_payout is None
     ):
-      target = max(
-        min(self.hoist_target_wire_length, actual_length),
-        0.05,
-      )
-      release = (
-        actual_length
-        if self.configured_release_target_wire_length is None
-        else max(
-          float(self.configured_release_target_wire_length),
-          target,
+      if self.ascend_hoist_reel_in_length is None:
+        target = max(
+          min(self.hoist_target_wire_length, actual_length),
+          0.05,
         )
-      )
-      self.ascend_nominal_hoist_reel_in = max(actual_length - target, 0.0)
-      self.ascend_nominal_payout = max(release - target, 0.0)
+        hoist_reel_in = max(actual_length - target, 0.0)
+      else:
+        hoist_reel_in = max(float(self.ascend_hoist_reel_in_length), 0.0)
+        target = max(actual_length - hoist_reel_in, 0.05)
+
+      if self.ascend_release_payout_length is None:
+        release = (
+          actual_length
+          if self.configured_release_target_wire_length is None
+          else max(
+            float(self.configured_release_target_wire_length),
+            target,
+          )
+        )
+        release_payout = max(release - target, 0.0)
+      else:
+        release_payout = max(float(self.ascend_release_payout_length), 0.0)
+
+      self.ascend_nominal_hoist_reel_in = hoist_reel_in
+      self.ascend_nominal_payout = release_payout
 
     self.target_wire_length = max(
       actual_length - self.ascend_nominal_hoist_reel_in,
@@ -1251,8 +1295,8 @@ class WireAssistWrapper:
         f"Lstart={actual_length:.3f}m "
         f"Lhoist={self.target_wire_length:.3f}m "
         f"Lrelease={self.release_target_wire_length:.3f}m "
-        f"reel={self.ascend_nominal_hoist_reel_in:.3f}m "
-        f"payout={self.ascend_nominal_payout:.3f}m",
+        f"inputs=(reel={self.ascend_nominal_hoist_reel_in:.3f}m, "
+        f"payout={self.ascend_nominal_payout:.3f}m)",
         flush=True,
       )
 
@@ -1264,12 +1308,10 @@ class WireAssistWrapper:
     announce=False,
     from_crouch=False,
   ):
-    """Derive hoist and landing lengths for a supported Tarzan arc.
+    """Configure gap as L_hoist = L_start - reel, L_release = L_hoist + payout.
 
-    The robot first gains horizontal motion like a pendulum, while controlled
-    reel-in compensates for the vertical drop that would otherwise put its feet
-    on the gap floor.  The landing length restores the crouched foot height on
-    the equal-height far platform.  Explicit lengths remain available.
+    If unified travel inputs are omitted, keep the current successful
+    geometry-derived solution and convert it to the same reel/payout pair.
     """
     attachment_height = max(float(attachment_pos[2] - box_top), 0.05)
     landing_attachment_z = (
@@ -1297,22 +1339,21 @@ class WireAssistWrapper:
     requested_landing = (
       base_landing + self.gap_release_wire_length_offset
     )
-    self.target_wire_length = max(
-      min(requested_hoist, actual_length),
-      0.05,
-    )
+    if self.gap_hoist_reel_in_length is None:
+      hoist_reel_in = max(actual_length - requested_hoist, 0.0)
+    else:
+      hoist_reel_in = max(float(self.gap_hoist_reel_in_length), 0.0)
+    self.target_wire_length = max(actual_length - hoist_reel_in, 0.05)
+    if self.gap_release_payout_length is None:
+      release_payout = max(requested_landing - self.target_wire_length, 0.0)
+    else:
+      release_payout = max(float(self.gap_release_payout_length), 0.0)
     self.release_target_wire_length = max(
-      requested_landing,
+      self.target_wire_length + release_payout,
       self.target_wire_length,
     )
-    self.gap_nominal_hoist_reel_in = max(
-      actual_length - self.target_wire_length,
-      0.0,
-    )
-    self.gap_nominal_payout = max(
-      self.release_target_wire_length - self.target_wire_length,
-      0.0,
-    )
+    self.gap_nominal_hoist_reel_in = hoist_reel_in
+    self.gap_nominal_payout = release_payout
     if announce:
       print(
         "[WIRE] gap profile armed"
@@ -1321,10 +1362,8 @@ class WireAssistWrapper:
         f"Lhoist={self.target_wire_length:.3f}m "
         f"Llanding={self.release_target_wire_length:.3f}m "
         f"h_attach={attachment_height:.3f}m "
-        f"offsets=({self.gap_hoist_wire_length_offset:+.3f},"
-        f"{self.gap_release_wire_length_offset:+.3f})m "
-        f"reel={self.gap_nominal_hoist_reel_in:.3f}m "
-        f"payout={self.gap_nominal_payout:.3f}m",
+        f"inputs=(reel={self.gap_nominal_hoist_reel_in:.3f}m, "
+        f"payout={self.gap_nominal_payout:.3f}m)",
         flush=True,
       )
 
@@ -2374,6 +2413,25 @@ class PlayConfig:
   # be observed instead of immediately resetting the simulation.
   no_terminations: bool = True
   gap_tilt_termination_limit_deg: float = 50.0
+  # Experimental geometry inputs.  The controller then converts these into
+  # L_start -> L_hoist -> L_release cable-length profiles.
+  ascend_anchor_x: float = 2.3
+  ascend_anchor_y: float = 0.0
+  ascend_anchor_z: float = 2.4
+  descend_anchor_x: float = 3.35
+  descend_anchor_y: float = 0.0
+  descend_anchor_z: float = 2.4
+  gap_anchor_x: float = 7.8
+  gap_anchor_y: float = 0.0
+  gap_anchor_z: float = 4.0
+  ascend_hoist_reel_in_length: float | None = None
+  ascend_release_payout_length: float | None = None
+  ascend_hoist_wire_length: float = 0.63
+  ascend_release_wire_length: float = 0.90
+  descend_hoist_reel_in_length: float | None = None
+  descend_release_payout_length: float | None = None
+  gap_hoist_reel_in_length: float | None = None
+  gap_release_payout_length: float | None = None
 
   _demo_mode: tyro.conf.Suppress[bool] = False
 
@@ -2532,15 +2590,25 @@ def run_play(task_id: str, cfg: PlayConfig):
   # All profiles share the same state machine.  Only edge detection, cable
   # length profile, fixed posture, spawn pose, and anchor placement differ.
   # =========================================================================
-  anchor_pos = (
-    (3.35, 0.0, 2.4)  #降りるときのぽｓ
-    if cfg.traversal_mode == "descend"
-    else (
-      (7.8, 0.0, 4.0)  # Far-side anchor supplies swing energy into the landing.
-      if cfg.traversal_mode == "gap"
-      else (2.3, 0.0, 2.4)
+  if cfg.traversal_mode == "descend":
+    anchor_pos = (
+      cfg.descend_anchor_x,
+      cfg.descend_anchor_y,
+      cfg.descend_anchor_z,
     )
-  )
+  elif cfg.traversal_mode == "gap":
+    # Far-side anchor supplies swing energy into the landing.
+    anchor_pos = (
+      cfg.gap_anchor_x,
+      cfg.gap_anchor_y,
+      cfg.gap_anchor_z,
+    )
+  else:
+    anchor_pos = (
+      cfg.ascend_anchor_x,
+      cfg.ascend_anchor_y,
+      cfg.ascend_anchor_z,
+    )
   walk_speed = 0.35 if cfg.traversal_mode in ("descend", "gap") else 0.5
   print(
     f"[WIRE] traversal_mode={cfg.traversal_mode} "
@@ -2561,6 +2629,14 @@ def run_play(task_id: str, cfg: PlayConfig):
     # Lateral velocity feedback only excites a side-to-side walking lean here.
     lateral_position_kp=0.0 if cfg.traversal_mode == "gap" else 0.8,
     max_lateral_speed=0.0 if cfg.traversal_mode == "gap" else 0.25,
+    hoist_target_wire_length=cfg.ascend_hoist_wire_length,
+    release_target_wire_length=cfg.ascend_release_wire_length,
+    ascend_hoist_reel_in_length=cfg.ascend_hoist_reel_in_length,
+    ascend_release_payout_length=cfg.ascend_release_payout_length,
+    descent_hoist_reel_in_length=cfg.descend_hoist_reel_in_length,
+    descent_release_payout_length=cfg.descend_release_payout_length,
+    gap_hoist_reel_in_length=cfg.gap_hoist_reel_in_length,
+    gap_release_payout_length=cfg.gap_release_payout_length,
     gap_crouch_wait_time=cfg.crouch_wait_time,
     gap_policy_handover_time=cfg.crouch_policy_handover_time,
     gap_crouch_blend_time=cfg.crouch_blend_time,
