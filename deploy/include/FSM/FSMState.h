@@ -51,6 +51,24 @@ public:
                 FSMStringMap.right.at("Passive")
             )
         );
+
+        // PC-side software stop.  Keep this check ahead of every joystick
+        // transition so that a SPACE key press wins if both inputs arrive in
+        // the same control cycle.  This requests the damping-only Passive
+        // state; it is not a substitute for an independent hardware E-stop.
+        registered_checks.insert(
+            registered_checks.begin(),
+            std::make_pair(
+                []()->bool {
+                    if (keyboard && keyboard->on_pressed && keyboard->key() == " ") {
+                        spdlog::warn("PC software stop requested (SPACE): switching to Passive");
+                        return true;
+                    }
+                    return false;
+                },
+                FSMStringMap.right.at("Passive")
+            )
+        );
     }
 
     void pre_run()

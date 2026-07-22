@@ -10,11 +10,18 @@
 #include <unitree/idl/hg/IMUState_.hpp>
 
 #include <iostream>
+#include <atomic>
+#include <cmath>
 
 #include "param.h"
 #include "physics_joystick.h"
 
 #define MOTOR_SENSOR_NUM 3
+
+// Used only by the optional headless/automated simulation test.  Physics is
+// released after a low-level controller has actually populated joint gains,
+// avoiding an uncontrolled drop while DDS is still connecting.
+inline std::atomic<bool> lowlevel_controller_armed{false};
 
 class UnitreeSDK2BridgeBase
 {
@@ -31,6 +38,8 @@ public:
                 joystick = std::make_shared<XBoxJoystick>(param::config.joystick_device, param::config.joystick_bits);
             } else if(param::config.joystick_type == "switch") {
                 joystick  = std::make_shared<SwitchJoystick>(param::config.joystick_device, param::config.joystick_bits);
+            } else if(param::config.joystick_type == "ps4") {
+                joystick = std::make_shared<PS4Joystick>(param::config.joystick_device, param::config.joystick_bits);
             } else {
                 std::cerr << "Unsupported joystick type: " << param::config.joystick_type << std::endl;
                 exit(EXIT_FAILURE);
@@ -178,11 +187,22 @@ public:
         // lowcmd
         {
             std::lock_guard<std::mutex> lock(lowcmd->mutex_);
+            bool has_active_joint_control = false;
+            double commanded_posture_norm = 0.0;
             for(int i(0); i<num_motor_; i++) {
                 auto & m = lowcmd->msg_.motor_cmd()[i];
+                has_active_joint_control = has_active_joint_control || m.kp() > 1.0f;
+                commanded_posture_norm += std::abs(static_cast<double>(m.q()));
                 mj_data_->ctrl[i] = m.tau() +
                                     m.kp() * (m.q() - mj_data_->sensordata[i]) +
                                     m.kd() * (m.dq() - mj_data_->sensordata[i + num_motor_]);
+            }
+            // The SDK's freshly-created LowCmd can already contain nonzero
+            // gains while all q targets are still zero.  Do not mistake that
+            // pre-inference message for an armed policy: it drives the G1
+            // toward the XML zero pose and causes an artificial startup fall.
+            if (has_active_joint_control && commanded_posture_norm > 1.0) {
+                lowlevel_controller_armed.store(true, std::memory_order_release);
             }
         }
 

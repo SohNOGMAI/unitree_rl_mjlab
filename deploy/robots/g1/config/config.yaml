@@ -8,14 +8,30 @@ FSM:
       id: 3
       type: RLBase
 
+    Crouch:
+      id: 4
+      type: Crouch
+
     Mimic_Dance1_subject2:
       id: 5
       type: Mimic
 
+    FixedPosture:
+      id: 6
+      type: FixedPosture
+
+    Stand:
+      id: 7
+      type: RLBase
+
 
   Passive:
-    transitions: 
-      FixStand: LT + up.on_pressed
+    transitions:
+      # Start the balancing walking actor directly.  FixStand is only a joint
+      # interpolation and cannot balance a free-standing humanoid in MuJoCo.
+      Stand: LT + up.on_pressed
+      # Retained as a manual recovery/pose test, but not used at startup.
+      FixStand: LT + X.on_pressed
     mode: [
       1,1,1,1,1,1,
       1,1,1,1,1,1,
@@ -66,9 +82,94 @@ FSM:
   Velocity:
     transitions: 
       Passive: LT + B.on_pressed
+      Crouch: RT + B.on_pressed
       Mimic_Dance1_subject2: RB + A.on_pressed
 
     policy_dir: config/policy/velocity
+
+
+  Stand:
+    transitions:
+      Passive: LT + B.on_pressed
+      Velocity: RT + A.on_pressed
+      Crouch: RT + B.on_pressed
+      # After the wire/harness has visibly started supporting the robot.
+      # Kept separate from the winch command to avoid an accidental pose jump.
+      FixedPosture: RB + Y.on_pressed
+
+    # Same walking actor as Velocity, but with commands and gait phase fixed
+    # exactly to zero.  This is independent of gamepad axis calibration.
+    policy_dir: config/policy/velocity
+    params_file: stand_deploy.yaml
+
+
+  Crouch:
+    transitions:
+      Passive: LT + B.on_pressed
+      # Returning directly to the walking actor from a deep crouch is unsafe.
+      # FixStand interpolates the current pose back to standing first.
+      FixStand: RT + X.on_pressed
+      # Test this transition only while the robot is supported by a harness.
+      FixedPosture: RT + Y.on_pressed
+
+    walking_policy_dir: config/policy/velocity
+    crouch_policy_dir: config/policy/crouch
+    crouch_wait_time_s: 0.3
+    policy_blend_time_s: 2.0
+    crouch_duration_s: 4.0
+    # 0.75 is the validated hold depth for the real-controller MuJoCo model.
+    # The 0.90 gap depth remains a later harness-supported experiment.
+    target_depth: 0.75
+    max_joint_target_rate_rad_s: 20.0
+
+    # Absolute joint targets used underneath the learned crouch residual.
+    # Order is the G1 29-DoF SDK order used by joint_ids_map.
+    crouch_target_q: [
+      -0.550000,  0.555556, 0.0, 0.950000, -0.242222, -0.047111,
+      -0.550000, -0.555556, 0.0, 0.950000, -0.242222,  0.047111,
+       0.0,       0.0,      0.080000,
+       0.500000,  1.000000, 0.0, 0.500000, 0.0, 0.0, 0.0,
+       0.500000, -1.000000, 0.0, 0.500000, 0.0, 0.0, 0.0
+    ]
+
+    # Residual-action handling must match the crouch training task.
+    locked_residual_joint_ids: [1, 5, 7, 11]
+    always_locked_residual_joint_ids: [12]
+    lock_residual_at_depth: 0.75
+    locked_residual_scale: 0.20
+
+
+  FixedPosture:
+    transitions:
+      Passive: LT + B.on_pressed
+      FixStand: RT + X.on_pressed
+
+    # Ascend mode's experimentally selected wide_lift pose.  It is not a
+    # self-balancing standing pose; use it only when the harness/wire supports
+    # the robot.  The transition starts from measured joint angles.
+    # Same slow interpolation used by play.py's wide_lift transition.
+    duration_s: 4.0
+    kp: [
+      40.2,99.1,40.2,99.1,28.5,28.5,
+      40.2,99.1,40.2,99.1,28.5,28.5,
+      40.2,28.5,28.5,
+      14.3,14.3,14.3,14.3,14.3,16.8,16.8,
+      14.3,14.3,14.3,14.3,14.3,16.8,16.8
+    ]
+    kd: [
+      2.6,6.3,2.6,6.3,1.8,1.8,
+      2.6,6.3,2.6,6.3,1.8,1.8,
+      2.6,1.8,1.8,
+      0.9,0.9,0.9,0.9,0.9,1.1,1.1,
+      0.9,0.9,0.9,0.9,0.9,1.1,1.1
+    ]
+    target_q: [
+      0.0,  0.40, 0.0, 0.55, -0.35, -0.26,
+      0.0, -0.40, 0.0, 0.55, -0.35,  0.26,
+      0.0, 0.0, 0.0,
+      0.50,  1.50, 0.0, 0.35, 0.0, 0.0, 0.0,
+      0.50, -1.50, 0.0, 0.35, 0.0, 0.0, 0.0
+    ]
 
 
   Mimic_Dance1_subject2:

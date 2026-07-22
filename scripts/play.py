@@ -62,6 +62,7 @@ class WireAssistWrapper:
   def __init__(
     self,
     env,
+    assistance_enabled=True,
     traversal_mode="ascend",
     anchor_pos=(2.5, 0.0, 2.4),
     attachment_pos_b=(-0.14, 0.0, 0.40),
@@ -193,6 +194,7 @@ class WireAssistWrapper:
     log_interval=0.25,
   ):
     self.env = env
+    self.assistance_enabled = bool(assistance_enabled)
     if traversal_mode not in ("ascend", "descend", "gap"):
       raise ValueError(
         "traversal_mode must be 'ascend', 'descend', or 'gap', "
@@ -957,6 +959,10 @@ class WireAssistWrapper:
 
   def crouch_policy_schedule(self):
     """Return walking/crouch blend and normalized crouch-depth commands."""
+    if not self.assistance_enabled:
+      self.external_crouch_blend = 0.0
+      self.external_crouch_depth = 0.0
+      return 0.0, 0.0
     if (
       self.external_crouch_policy
       and self.phase == self.PHASE_LIFT
@@ -1940,6 +1946,30 @@ class WireAssistWrapper:
   def step(self, action):
     self.step_counter += 1
     robot_com, body_com, attachment_pos, _, pitch, yaw, vz = self._robot_state()
+    if not self.assistance_enabled:
+      # Paper-evaluation nominal condition: retain exactly the same walking
+      # actor, terrain, reset and seed, while bypassing every assist-specific
+      # intervention (wire force, state machine, crouch and fixed postures).
+      # Keep the geometric cable length observable for diagnostics only.
+      self.phase = self.PHASE_APPROACH
+      self.wire_length = float(np.linalg.norm(self.anchor_pos - attachment_pos))
+      self.commanded_wire_length = None
+      self.target_wire_length = None
+      self.release_target_wire_length = None
+      self.tension = 0.0
+      self.desired_tension = 0.0
+      self.commanded_wire_rate = 0.0
+      self._apply_cable_force(body_com, attachment_pos, 0.0)
+      self.waist_lock_active = False
+      self.posture_lock_active = False
+      self.posture_mode = None
+      self._set_walking_command(
+        yaw,
+        lateral_position=robot_com[1],
+        allow_forward=True,
+      )
+      self.last_applied_action = action.detach().clone()
+      return self.env.step(action)
     if self.target_heading is None:
       direction = self.anchor_pos - robot_com
       self.target_heading = float(np.arctan2(direction[1], direction[0]))
@@ -2433,13 +2463,55 @@ class PlayConfig:
   gap_hoist_reel_in_length: float | None = None
   gap_release_payout_length: float | None = None
 
+  # Headless paper-evaluation mode.  "interactive" preserves the normal
+  # viewer behavior.  Evaluation is intentionally opt-in so regular playback
+  # and the existing assisted controller remain unchanged.
+  evaluation_condition: Literal["interactive", "nominal", "assisted"] = (
+    "interactive"
+  )
+  evaluation_output_csv: str | None = None
+  evaluation_seed: int = 0
+  evaluation_timeout_s: float = 20.0
+  evaluation_max_attitude_deg: float | None = None
+  evaluation_stability_duration_s: float = 1.0
+
   _demo_mode: tyro.conf.Suppress[bool] = False
 
 def run_play(task_id: str, cfg: PlayConfig):
   configure_torch_backends()
+  evaluation_active = cfg.evaluation_condition != "interactive"
+  if evaluation_active and cfg.evaluation_output_csv is None:
+    raise ValueError(
+      "evaluation_output_csv is required when evaluation_condition is set"
+    )
+  if evaluation_active:
+    np.random.seed(cfg.evaluation_seed)
+    torch.manual_seed(cfg.evaluation_seed)
+    if torch.cuda.is_available():
+      torch.cuda.manual_seed_all(cfg.evaluation_seed)
   device = cfg.device or ("cuda:0" if torch.cuda.is_available() else "cpu")
   env_cfg = load_env_cfg(task_id, play=True)
   agent_cfg = load_rl_cfg(task_id)
+  evaluation_max_attitude_deg = cfg.evaluation_max_attitude_deg
+  if evaluation_active and evaluation_max_attitude_deg is None:
+    # Use the velocity task's actual fall threshold for every primitive.  The
+    # interactive experiments deliberately disable terminations, but the
+    # original task configuration still provides the auditable 70-deg limit.
+    # The separate 50-deg gap playback option is only applied when interactive
+    # terminations are explicitly enabled; it is not active in the user's
+    # successful no-termination command.
+    fell_over = env_cfg.terminations.get("fell_over")
+    limit_rad = (
+      fell_over.params.get("limit_angle")
+      if fell_over is not None
+      else None
+    )
+    evaluation_max_attitude_deg = (
+      math.degrees(float(limit_rad)) if limit_rad is not None else 45.0
+    )
+  if evaluation_active:
+    env_cfg.seed = cfg.evaluation_seed
+    agent_cfg.seed = cfg.evaluation_seed
   DUMMY_MODE = cfg.agent in {"zero", "random"}
   TRAINED_MODE = not DUMMY_MODE
   use_crouch_policy = (
@@ -2493,7 +2565,10 @@ def run_play(task_id: str, cfg: PlayConfig):
       resume_path, _ = get_wandb_checkpoint_path(log_root_path, Path(cfg.wandb_run_path))
     log_dir = resume_path.parent
 
-  if cfg.num_envs is not None: env_cfg.scene.num_envs = cfg.num_envs
+  if evaluation_active:
+    env_cfg.scene.num_envs = 1
+  elif cfg.num_envs is not None:
+    env_cfg.scene.num_envs = cfg.num_envs
   if cfg.video_height is not None: env_cfg.viewer.height = cfg.video_height
   if cfg.video_width is not None: env_cfg.viewer.width = cfg.video_width
   env_cfg.viewer.enable_shadows = cfg.viewer_shadows
@@ -2550,6 +2625,17 @@ def run_play(task_id: str, cfg: PlayConfig):
     twist_cfg.ranges.lin_vel_y = (0.0, 0.0)
     twist_cfg.ranges.ang_vel_z = (0.0, 0.0)
     twist_cfg.ranges.heading = None
+
+  if evaluation_active:
+    # The task's standard foot sensor filters contacts to the flat terrain
+    # body, so it reports no contact while a foot is correctly standing on the
+    # step or a gap platform.  For evaluation only, retain the same primary
+    # foot geoms but accept any opposing geom.  This makes post-traversal
+    # stability a physical contact test rather than a controller-phase proxy.
+    for sensor_cfg in env_cfg.scene.sensors or ():
+      if sensor_cfg.name == "feet_ground_contact":
+        sensor_cfg.secondary_policy = "any"
+        break
 
   # Added obstacle geoms can exceed MJWarp's automatically selected broadphase
   # capacity.  The observed minimum was 54, so reserve a comfortable margin.
@@ -2617,6 +2703,7 @@ def run_play(task_id: str, cfg: PlayConfig):
   )
   wire_env = WireAssistWrapper(
     env,
+    assistance_enabled=cfg.evaluation_condition != "nominal",
     traversal_mode=cfg.traversal_mode,
     anchor_pos=anchor_pos,
     obstacle_body_names=(
@@ -2644,6 +2731,10 @@ def run_play(task_id: str, cfg: PlayConfig):
     gap_crouch_depth=cfg.crouch_depth,
     external_crouch_policy=use_crouch_policy,
   )
+  if evaluation_active:
+    # Per-step data are already streamed to CSV; keep the terminal readable
+    # during 60-trial batches without changing any controller parameter.
+    wire_env.log_interval = 5.0
   env = wire_env
 
   if TRAINED_MODE and cfg.video:
@@ -2703,6 +2794,41 @@ def run_play(task_id: str, cfg: PlayConfig):
         f"depth={wire_env.gap_crouch_depth:.2f}",
         flush=True,
       )
+
+  if evaluation_active:
+    from src.wire_eval import WireTrialEvaluator
+
+    evaluator = WireTrialEvaluator(
+      wire_env,
+      condition=cfg.evaluation_condition,
+      seed=cfg.evaluation_seed,
+      output_csv=cfg.evaluation_output_csv,
+      timeout_s=cfg.evaluation_timeout_s,
+      max_attitude_deg=evaluation_max_attitude_deg,
+      stability_duration_s=cfg.evaluation_stability_duration_s,
+    )
+    observations = env.get_observations()
+    try:
+      with torch.inference_mode():
+        while not evaluator.finished:
+          evaluator.advance_time()
+          actions = policy(observations)
+          observations, _, _, _ = env.step(actions)
+          evaluator.observe()
+      result = evaluator.finalize()
+    finally:
+      evaluator.close()
+      env.close()
+    print(
+      "[EVAL] "
+      f"primitive={result['primitive']} "
+      f"condition={result['condition']} seed={result['seed']} "
+      f"success={result['success']} "
+      f"reason={result['failure_reason'] or '-'} "
+      f"time={result['completion_time_s']:.3f}s",
+      flush=True,
+    )
+    return result
 
   if cfg.viewer == "auto":
     has_display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))

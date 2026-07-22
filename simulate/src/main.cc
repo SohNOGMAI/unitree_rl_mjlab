@@ -18,11 +18,14 @@
 #undef private
 
 #include <chrono>
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <iomanip>
 #include <memory>
 #include <mutex>
 #include <new>
@@ -99,6 +102,200 @@ namespace
   // model and data
   mjModel *m = nullptr;
   mjData *d = nullptr;
+
+  class VirtualHoist
+  {
+  public:
+    void Apply()
+    {
+      if (!param::config.virtual_hoist || !m || !d)
+      {
+        return;
+      }
+
+      if (body_id_ < 0 || site_id_ < 0)
+      {
+        body_id_ = mj_name2id(m, mjOBJ_BODY, "torso_link");
+        site_id_ = mj_name2id(m, mjOBJ_SITE, "wire_attachment");
+        if (body_id_ < 0 || site_id_ < 0)
+        {
+          if (!missing_site_reported_)
+          {
+            std::cerr << "[HOIST] torso_link or wire_attachment was not found; "
+                         "virtual hoist disabled\n";
+            missing_site_reported_ = true;
+          }
+          return;
+        }
+      }
+
+      // Do not leave a stale wrench behind after reset or before start.
+      double* wrench = d->xfrc_applied + 6 * body_id_;
+      for (int i = 0; i < 6; ++i) wrench[i] = 0.0;
+
+      if (d->time < last_time_s_)
+      {
+        Reset();
+      }
+      const double dt = last_time_s_ >= 0.0
+          ? std::max(d->time - last_time_s_, 0.0)
+          : m->opt.timestep;
+      last_time_s_ = d->time;
+
+      const bool start_requested = param::config.virtual_hoist_gamepad_trigger
+          ? virtual_hoist_requested.load(std::memory_order_acquire)
+          : d->time >= param::config.virtual_hoist_start_s;
+      if (!start_requested)
+      {
+        return;
+      }
+
+      const double* p = d->site_xpos + 3 * site_id_;
+      const double anchor[3] = {
+          param::config.virtual_hoist_anchor_x,
+          param::config.virtual_hoist_anchor_y,
+          param::config.virtual_hoist_anchor_z};
+      double delta[3] = {
+          anchor[0] - p[0], anchor[1] - p[1], anchor[2] - p[2]};
+      const double length = mju_norm3(delta);
+      if (length < 1.0e-6) return;
+      double direction[3] = {
+          delta[0] / length, delta[1] / length, delta[2] / length};
+
+      if (!armed_)
+      {
+        // Capture the measured length first.  Consequently enabling the cable
+        // produces zero extension and no impulsive preload.
+        initial_length_m_ = length;
+        commanded_length_m_ = length;
+        const double* com = d->xpos + 3 * body_id_;
+        guide_x_m_ = com[0];
+        guide_y_m_ = com[1];
+        const double* rotation = d->xmat + 9 * body_id_;
+        guide_yaw_rad_ = std::atan2(rotation[3], rotation[0]);
+        armed_ = true;
+        std::cout << std::fixed << std::setprecision(3)
+                  << "[HOIST] armed at t=" << d->time
+                  << "s L0=" << initial_length_m_ << "m\n";
+      }
+
+      const double target_length = std::max(
+          initial_length_m_ - param::config.virtual_hoist_reel_distance_m, 0.05);
+      commanded_length_m_ = std::max(
+          target_length,
+          commanded_length_m_ - param::config.virtual_hoist_reel_speed_m_s * dt);
+
+      mjtNum velocity6[6] = {0, 0, 0, 0, 0, 0};
+      mj_objectVelocity(m, d, mjOBJ_SITE, site_id_, velocity6, 0);
+      // MuJoCo returns angular velocity first, then linear velocity.
+      const double toward_anchor_velocity =
+          velocity6[3] * direction[0] +
+          velocity6[4] * direction[1] +
+          velocity6[5] * direction[2];
+      const double length_rate = -toward_anchor_velocity;
+      const double raw_tension = std::clamp(
+          param::config.virtual_hoist_stiffness_n_m *
+              (length - commanded_length_m_) +
+          param::config.virtual_hoist_damping_n_s_m * length_rate,
+          0.0, param::config.virtual_hoist_max_tension_n);
+      const double max_delta_tension =
+          param::config.virtual_hoist_tension_rate_n_s * dt;
+      tension_n_ += std::clamp(
+          raw_tension - tension_n_, -max_delta_tension, max_delta_tension);
+
+      const double force[3] = {
+          tension_n_ * direction[0],
+          tension_n_ * direction[1],
+          tension_n_ * direction[2]};
+      const double* com = d->xpos + 3 * body_id_;
+      const double r[3] = {p[0] - com[0], p[1] - com[1], p[2] - com[2]};
+      const double torque[3] = {
+          r[1] * force[2] - r[2] * force[1],
+          r[2] * force[0] - r[0] * force[2],
+          r[0] * force[1] - r[1] * force[0]};
+      for (int i = 0; i < 3; ++i)
+      {
+        wrench[i] = force[i];
+        wrench[3 + i] = torque[i];
+      }
+
+      if (param::config.virtual_hoist_pose_guide)
+      {
+        // Test fixture only: it removes horizontal pendulum motion and cable-
+        // axis spin while leaving vertical translation completely free.  This
+        // isolates the joint-posture transition from single-cable yaw physics.
+        mjtNum body_velocity[6] = {0, 0, 0, 0, 0, 0};
+        mj_objectVelocity(m, d, mjOBJ_BODY, body_id_, body_velocity, 0);
+        constexpr double kPosition = 400.0;
+        constexpr double dPosition = 120.0;
+        constexpr double maxHorizontalForce = 150.0;
+        double guide_fx = kPosition * (guide_x_m_ - com[0])
+                        - dPosition * body_velocity[3];
+        double guide_fy = kPosition * (guide_y_m_ - com[1])
+                        - dPosition * body_velocity[4];
+        const double guide_force_norm = std::hypot(guide_fx, guide_fy);
+        if (guide_force_norm > maxHorizontalForce)
+        {
+          const double scale = maxHorizontalForce / guide_force_norm;
+          guide_fx *= scale;
+          guide_fy *= scale;
+        }
+        wrench[0] += guide_fx;
+        wrench[1] += guide_fy;
+
+        const double* rotation = d->xmat + 9 * body_id_;
+        const double yaw = std::atan2(rotation[3], rotation[0]);
+        const double yaw_error = std::atan2(
+            std::sin(guide_yaw_rad_ - yaw),
+            std::cos(guide_yaw_rad_ - yaw));
+        constexpr double kYaw = 30.0;
+        constexpr double dYaw = 10.0;
+        constexpr double maxYawTorque = 30.0;
+        wrench[5] += std::clamp(
+            kYaw * yaw_error - dYaw * body_velocity[2],
+            -maxYawTorque, maxYawTorque);
+      }
+
+      if (d->time >= next_log_time_s_)
+      {
+        std::cout << std::fixed << std::setprecision(3)
+                  << "[HOIST] t=" << d->time << "s L=" << length
+                  << "m Lcmd=" << commanded_length_m_
+                  << "m T=" << std::setprecision(1) << tension_n_
+                  << "N z_attach=" << std::setprecision(3) << p[2] << "m\n";
+        next_log_time_s_ = d->time + 0.25;
+      }
+    }
+
+  private:
+    void Reset()
+    {
+      armed_ = false;
+      initial_length_m_ = 0.0;
+      commanded_length_m_ = 0.0;
+      tension_n_ = 0.0;
+      last_time_s_ = -1.0;
+      next_log_time_s_ = 0.0;
+      guide_x_m_ = 0.0;
+      guide_y_m_ = 0.0;
+      guide_yaw_rad_ = 0.0;
+    }
+
+    int body_id_ = -1;
+    int site_id_ = -1;
+    bool missing_site_reported_ = false;
+    bool armed_ = false;
+    double initial_length_m_ = 0.0;
+    double commanded_length_m_ = 0.0;
+    double tension_n_ = 0.0;
+    double last_time_s_ = -1.0;
+    double next_log_time_s_ = 0.0;
+    double guide_x_m_ = 0.0;
+    double guide_y_m_ = 0.0;
+    double guide_yaw_rad_ = 0.0;
+  };
+
+  VirtualHoist virtual_hoist;
 
   // control noise variables
   mjtNum *ctrlnoise = nullptr;
@@ -330,6 +527,10 @@ namespace
     // cpu-sim syncronization point
     std::chrono::time_point<mj::Simulate::Clock> syncCPU;
     mjtNum syncSim = 0;
+    bool auto_start_reported = false;
+    bool controller_command_detected = false;
+    std::chrono::steady_clock::time_point controller_command_detected_at;
+    double next_diagnostic_time = 0.0;
 
     // ChannelFactory::Instance()->Init(0);
     // UnitreeDds ud(d);
@@ -462,6 +663,7 @@ namespace
               sim.speed_changed = false;
 
               // run single step, let next iteration deal with timing
+              virtual_hoist.Apply();
               mj_step(m, d);
               stepped = true;
             }
@@ -502,6 +704,10 @@ namespace
                   }
                 }
 
+                // Apply the simulation-only cable immediately before every
+                // integration step so its force cannot depend on viewer FPS.
+                virtual_hoist.Apply();
+
                 // call mj_step
                 mj_step(m, d);
                 stepped = true;
@@ -527,6 +733,50 @@ namespace
             // run mj_forward, to update rendering and joint sliders
             mj_forward(m, d);
             sim.speed_changed = true;
+            if (param::config.auto_start_on_control &&
+                lowlevel_controller_armed.load(std::memory_order_acquire) &&
+                !controller_command_detected)
+            {
+              controller_command_detected = true;
+              controller_command_detected_at = std::chrono::steady_clock::now();
+            }
+            const bool controller_settled = controller_command_detected &&
+                std::chrono::duration<double>(
+                    std::chrono::steady_clock::now() - controller_command_detected_at
+                ).count() >= param::config.auto_start_control_delay_s;
+            if (param::config.auto_start_on_control && controller_settled)
+            {
+              sim.run = 1;
+              if (!auto_start_reported)
+              {
+                std::cout << "[SIM] Controller armed; physics started automatically."
+                          << std::endl;
+                auto_start_reported = true;
+              }
+            }
+          }
+
+          if (param::config.print_robot_diagnostics && sim.run && d->time >= next_diagnostic_time)
+          {
+            // The G1 root is a free joint: xyz followed by a wxyz quaternion.
+            const double w = d->qpos[3];
+            const double x = d->qpos[4];
+            const double y = d->qpos[5];
+            const double z = d->qpos[6];
+            const double roll = std::atan2(
+                2.0 * (w * x + y * z), 1.0 - 2.0 * (x * x + y * y));
+            const double pitch = std::asin(std::clamp(
+                2.0 * (w * y - z * x), -1.0, 1.0));
+            const double yaw = std::atan2(
+                2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z));
+            constexpr double rad_to_deg = 57.29577951308232;
+            std::cout << std::fixed << std::setprecision(3)
+                      << "[SIM] t=" << d->time
+                      << " pos=(" << d->qpos[0] << "," << d->qpos[1] << "," << d->qpos[2] << ")"
+                      << " rpy_deg=(" << roll * rad_to_deg << ","
+                      << pitch * rad_to_deg << "," << yaw * rad_to_deg << ")"
+                      << std::endl;
+            next_diagnostic_time = d->time + 0.25;
           }
         }
       } // release std::lock_guard<std::mutex>
@@ -547,6 +797,19 @@ void PhysicsThread(mj::Simulate *sim, const char *filename)
       d = mj_makeData(m);
     if (d)
     {
+      if (!param::config.initial_keyframe.empty())
+      {
+        int key_id = mj_name2id(m, mjOBJ_KEY, param::config.initial_keyframe.c_str());
+        if (key_id < 0)
+        {
+          std::cerr << "Initial keyframe not found: "
+                    << param::config.initial_keyframe << std::endl;
+          std::exit(EXIT_FAILURE);
+        }
+        mj_resetDataKeyframe(m, d, key_id);
+        std::cout << "Initial keyframe loaded: "
+                  << param::config.initial_keyframe << std::endl;
+      }
       sim->Load(m, d, filename);
       mj_forward(m, d);
 
@@ -622,6 +885,11 @@ __attribute__((used, visibility("default"))) extern "C" void _mj_rosettaError(co
 void user_key_cb(GLFWwindow* window, int key, int scancode, int act, int mods) {
   if (act==GLFW_PRESS)
   {
+    if (param::config.virtual_hoist && key == GLFW_KEY_H)
+    {
+      virtual_hoist_requested.store(true, std::memory_order_release);
+      std::cout << "[HOIST] keyboard H request received\n";
+    }
     if(param::config.enable_elastic_band == 1) {
       if (key==GLFW_KEY_9) {
         elastic_band.enable_ = !elastic_band.enable_;
@@ -632,7 +900,14 @@ void user_key_cb(GLFWwindow* window, int key, int scancode, int act, int mods) {
       }
     }
     if(key==GLFW_KEY_BACKSPACE) {
-      mj_resetData(m, d);
+      int key_id = param::config.initial_keyframe.empty()
+          ? -1
+          : mj_name2id(m, mjOBJ_KEY, param::config.initial_keyframe.c_str());
+      if (key_id >= 0) {
+        mj_resetDataKeyframe(m, d, key_id);
+      } else {
+        mj_resetData(m, d);
+      }
       mj_forward(m, d);
     }
   }

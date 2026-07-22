@@ -204,8 +204,10 @@ class Simulate {
   // index of history-scrubber slider
   int scrub_index = 0;
 
-  // simulation
-  int run = 1;
+  // Start paused so a floating-base humanoid does not collapse before its
+  // external low-level controller has connected and entered FixStand.
+  // Press Space in the viewer to start physics after arming the controller.
+  int run = 0;
 
   // atomics for cross-thread messages
   std::atomic_int exitrequest = 0;

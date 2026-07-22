@@ -36,12 +36,26 @@ State_RLBase::State_RLBase(int state_mode, std::string state_string)
 {
     auto cfg = param::config["FSM"][state_string];
     auto policy_dir = param::parser_policy_dir(cfg["policy_dir"].as<std::string>());
+    const std::string params_file = cfg["params_file"]
+        ? cfg["params_file"].as<std::string>()
+        : "deploy.yaml";
 
+    const auto deploy_cfg = YAML::LoadFile(
+        policy_dir / "params" / params_file
+    );
     env = std::make_unique<isaaclab::ManagerBasedRLEnv>(
-        YAML::LoadFile(policy_dir / "params" / "deploy.yaml"),
+        deploy_cfg,
         std::make_shared<unitree::BaseArticulation<LowState_t::SharedPtr>>(FSMState::lowstate)
     );
     env->alg = std::make_unique<isaaclab::OrtRunner>(policy_dir / "exported" / "policy.onnx");
+
+    const auto action_cfg = deploy_cfg["actions"]["JointPositionAction"];
+    action_scale_ = action_cfg["scale"].as<std::vector<float>>();
+    action_offset_ = action_cfg["offset"].as<std::vector<float>>();
+    if (action_scale_.size() != 29 || action_offset_.size() != 29)
+    {
+        throw std::runtime_error("Velocity action scale/offset must be 29-D.");
+    }
 
     this->registered_checks.emplace_back(
         std::make_pair(
@@ -53,8 +67,12 @@ State_RLBase::State_RLBase(int state_mode, std::string state_string)
 
 void State_RLBase::run()
 {
-    auto action = env->action_manager->processed_actions();
+    std::lock_guard<std::mutex> lock(command_mutex_);
+    if (commanded_q_.size() != env->robot->data.joint_ids_map.size())
+    {
+        return;
+    }
     for(int i(0); i < env->robot->data.joint_ids_map.size(); i++) {
-        lowcmd->msg_.motor_cmd()[env->robot->data.joint_ids_map[i]].q() = action[i];
+        lowcmd->msg_.motor_cmd()[env->robot->data.joint_ids_map[i]].q() = commanded_q_[i];
     }
 }

@@ -1,0 +1,294 @@
+[2026-07-22 18:54:13] [info] Waiting for connection to robot...
+[2026-07-22 18:54:13] [info] Connected to robot.
+[2026-07-22 18:54:13] [info] Initializing State_Passive ...
+[2026-07-22 18:54:13] [info] Initializing State_FixStand ...
+[2026-07-22 18:54:13] [info] Initializing State_Velocity ...
+[2026-07-22 18:54:13] [info] Policy directory: /home/soonogami/workspace/unitree_rl_mjlab/deploy/robots/g1/config/policy/velocity/v0
+[2026-07-22 18:54:13] [info] Initializing State_Crouch ...
+[2026-07-22 18:54:13] [info] Policy directory: /home/soonogami/workspace/unitree_rl_mjlab/deploy/robots/g1/config/policy/velocity/v0
+[2026-07-22 18:54:13] [info] Policy directory: /home/soonogami/workspace/unitree_rl_mjlab/deploy/robots/g1/config/policy/crouch/v0
+[2026-07-22 18:54:13] [info] Initializing State_Mimic_Dance1_subject2 ...
+[2026-07-22 18:54:13] [info] Policy directory: /home/soonogami/workspace/unitree_rl_mjlab/deploy/robots/g1/config/policy/mimic/dance1_subject2/
+[2026-07-22 18:54:13] [info] Loaded motion file 'dance1_subject2' with duration 131.48s
+[2026-07-22 18:54:14] [info] Initializing State_FixedPosture ...
+[2026-07-22 18:54:14] [info] FSM: Start Passive
+[2026-07-22 18:54:24] [info] FSM: Change state from Passive to FixStand
+[2026-07-22 18:54:45] [info] FSM: Change state from FixStand to Passive
+[2026-07-22 19:00:13] [info] Waiting for connection to robot...
+[2026-07-22 19:00:13] [info] Connected to robot.
+[2026-07-22 19:00:13] [info] Initializing State_Passive ...
+[2026-07-22 19:00:13] [info] Initializing State_FixStand ...
+[2026-07-22 19:00:13] [info] Initializing State_Velocity ...
+[2026-07-22 19:00:13] [info] Policy directory: /home/soonogami/workspace/unitree_rl_mjlab/deploy/robots/g1/config/policy/velocity/v0
+[2026-07-22 19:00:13] [info] Initializing State_Crouch ...
+[2026-07-22 19:00:13] [info] Policy directory: /home/soonogami/workspace/unitree_rl_mjlab/deploy/robots/g1/config/policy/velocity/v0
+[2026-07-22 19:00:13] [info] Policy directory: /home/soonogami/workspace/unitree_rl_mjlab/deploy/robots/g1/config/policy/crouch/v0
+[2026-07-22 19:00:13] [info] Initializing State_Mimic_Dance1_subject2 ...
+[2026-07-22 19:00:13] [info] Policy directory: /home/soonogami/workspace/unitree_rl_mjlab/deploy/robots/g1/config/policy/mimic/dance1_subject2/
+[2026-07-22 19:00:13] [info] Loaded motion file 'dance1_subject2' with duration 131.48s
+[2026-07-22 19:00:13] [info] Initializing State_FixedPosture ...
+[2026-07-22 19:00:13] [info] FSM: Start Passive
+[2026-07-22 19:00:28] [info] FSM: Change state from Passive to FixStand
+[2026-07-22 19:01:30] [info] FSM: Change state from FixStand to Velocity
+[2026-07-22 19:02:24] [info] FSM: Change state from Velocity to Crouch
+[2026-07-22 19:02:24] [info] Crouch phase=POLICY_BLEND blend=0.00 depth=0.00 yaw_error=+0.0deg
+[2026-07-22 19:02:24] [info] Crouch started: 1.0s policy blend, 4.0s depth ramp to 0.90.
+[2026-07-22 19:02:25] [info] Crouch phase=CROUCHING blend=1.00 depth=0.00 yaw_error=-3.3deg
+[2026-07-22 19:02:26] [info] Crouch phase=CROUCHING blend=1.00 depth=0.23 yaw_error=-5.1deg
+[2026-07-22 19:02:27] [info] Crouch phase=CROUCHING blend=1.00 depth=0.45 yaw_error=+22.0deg
+[2026-07-22 19:02:28] [info] Crouch phase=CROUCHING blend=1.00 depth=0.68 yaw_error=+25.3deg
+[2026-07-22 19:02:29] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+29.7deg
+[2026-07-22 19:02:30] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+26.9deg
+[2026-07-22 19:02:31] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+21.2deg
+[2026-07-22 19:02:32] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+23.1deg
+[2026-07-22 19:02:33] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+27.4deg
+[2026-07-22 19:02:34] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+30.4deg
+[2026-07-22 19:02:35] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+34.9deg
+[2026-07-22 19:02:36] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+38.1deg
+[2026-07-22 19:02:37] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+38.6deg
+[2026-07-22 19:02:38] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+38.6deg
+[2026-07-22 19:02:39] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+38.6deg
+[2026-07-22 19:02:40] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+38.6deg
+[2026-07-22 19:02:41] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+38.6deg
+[2026-07-22 19:02:42] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+38.6deg
+[2026-07-22 19:02:43] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+38.6deg
+[2026-07-22 19:02:44] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+38.6deg
+[2026-07-22 19:02:45] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+38.6deg
+[2026-07-22 19:02:46] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+38.6deg
+[2026-07-22 19:02:47] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+38.6deg
+[2026-07-22 19:02:48] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+38.6deg
+[2026-07-22 19:02:49] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+38.6deg
+[2026-07-22 19:02:50] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+38.6deg
+[2026-07-22 19:02:51] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+38.6deg
+[2026-07-22 19:02:51] [info] FSM: Change state from Crouch to Passive
+[2026-07-22 19:03:20] [info] FSM: Change state from Passive to FixStand
+[2026-07-22 19:03:28] [info] FSM: Change state from FixStand to Passive
+[2026-07-22 19:03:32] [info] FSM: Change state from Passive to FixStand
+[2026-07-22 19:03:39] [info] FSM: Change state from FixStand to Passive
+[2026-07-22 19:04:24] [info] FSM: Change state from Passive to FixStand
+[2026-07-22 19:04:46] [info] FSM: Change state from FixStand to Passive
+[2026-07-22 19:10:35] [critical] The other process is using the lowcmd channel, please close it first.
+[2026-07-22 19:10:39] [info] Waiting for connection to robot...
+[2026-07-22 19:10:39] [info] Connected to robot.
+[2026-07-22 19:10:40] [info] Initializing State_Passive ...
+[2026-07-22 19:10:40] [info] Initializing State_FixStand ...
+[2026-07-22 19:10:40] [info] Initializing State_Velocity ...
+[2026-07-22 19:10:40] [info] Policy directory: /home/soonogami/workspace/unitree_rl_mjlab/deploy/robots/g1/config/policy/velocity/v0
+[2026-07-22 19:10:40] [info] Initializing State_Crouch ...
+[2026-07-22 19:10:40] [info] Policy directory: /home/soonogami/workspace/unitree_rl_mjlab/deploy/robots/g1/config/policy/velocity/v0
+[2026-07-22 19:10:40] [info] Policy directory: /home/soonogami/workspace/unitree_rl_mjlab/deploy/robots/g1/config/policy/crouch/v0
+[2026-07-22 19:10:40] [info] Initializing State_Mimic_Dance1_subject2 ...
+[2026-07-22 19:10:40] [info] Policy directory: /home/soonogami/workspace/unitree_rl_mjlab/deploy/robots/g1/config/policy/mimic/dance1_subject2/
+[2026-07-22 19:10:40] [info] Loaded motion file 'dance1_subject2' with duration 131.48s
+[2026-07-22 19:10:40] [info] Initializing State_FixedPosture ...
+[2026-07-22 19:10:40] [info] FSM: Start Passive
+[2026-07-22 19:11:54] [critical] The other process is using the lowcmd channel, please close it first.
+[2026-07-22 19:11:58] [info] Waiting for connection to robot...
+[2026-07-22 19:11:58] [info] Connected to robot.
+[2026-07-22 19:11:59] [info] Initializing State_Passive ...
+[2026-07-22 19:11:59] [info] Initializing State_FixStand ...
+[2026-07-22 19:11:59] [info] Initializing State_Velocity ...
+[2026-07-22 19:11:59] [info] Policy directory: /home/soonogami/workspace/unitree_rl_mjlab/deploy/robots/g1/config/policy/velocity/v0
+[2026-07-22 19:11:59] [info] Initializing State_Crouch ...
+[2026-07-22 19:11:59] [info] Policy directory: /home/soonogami/workspace/unitree_rl_mjlab/deploy/robots/g1/config/policy/velocity/v0
+[2026-07-22 19:11:59] [info] Policy directory: /home/soonogami/workspace/unitree_rl_mjlab/deploy/robots/g1/config/policy/crouch/v0
+[2026-07-22 19:11:59] [info] Initializing State_Mimic_Dance1_subject2 ...
+[2026-07-22 19:11:59] [info] Policy directory: /home/soonogami/workspace/unitree_rl_mjlab/deploy/robots/g1/config/policy/mimic/dance1_subject2/
+[2026-07-22 19:11:59] [info] Loaded motion file 'dance1_subject2' with duration 131.48s
+[2026-07-22 19:11:59] [info] Initializing State_FixedPosture ...
+[2026-07-22 19:11:59] [info] FSM: Start Passive
+[2026-07-22 19:13:06] [info] FSM: Change state from Passive to FixStand
+[2026-07-22 19:13:43] [info] FSM: Change state from FixStand to Passive
+[2026-07-22 19:13:45] [info] FSM: Change state from Passive to FixStand
+[2026-07-22 19:13:52] [info] FSM: Change state from FixStand to Velocity
+[2026-07-22 19:14:26] [info] FSM: Change state from Velocity to Passive
+[2026-07-22 19:21:26] [info] Waiting for connection to robot...
+[2026-07-22 19:21:26] [info] Connected to robot.
+[2026-07-22 19:21:26] [info] Initializing State_Passive ...
+[2026-07-22 19:21:26] [info] Initializing State_FixStand ...
+[2026-07-22 19:21:26] [info] Initializing State_Velocity ...
+[2026-07-22 19:21:26] [info] Policy directory: /home/soonogami/workspace/unitree_rl_mjlab/deploy/robots/g1/config/policy/velocity/v0
+[2026-07-22 19:21:26] [info] Initializing State_Crouch ...
+[2026-07-22 19:21:26] [info] Policy directory: /home/soonogami/workspace/unitree_rl_mjlab/deploy/robots/g1/config/policy/velocity/v0
+[2026-07-22 19:21:26] [info] Policy directory: /home/soonogami/workspace/unitree_rl_mjlab/deploy/robots/g1/config/policy/crouch/v0
+[2026-07-22 19:21:26] [info] Initializing State_Mimic_Dance1_subject2 ...
+[2026-07-22 19:21:26] [info] Policy directory: /home/soonogami/workspace/unitree_rl_mjlab/deploy/robots/g1/config/policy/mimic/dance1_subject2/
+[2026-07-22 19:21:26] [info] Loaded motion file 'dance1_subject2' with duration 131.48s
+[2026-07-22 19:21:26] [info] Initializing State_FixedPosture ...
+[2026-07-22 19:21:26] [info] FSM: Start Passive
+[2026-07-22 19:21:38] [info] FSM: Change state from Passive to Velocity
+[2026-07-22 19:22:07] [info] FSM: Change state from Velocity to Crouch
+[2026-07-22 19:22:07] [info] Crouch phase=POLICY_BLEND blend=0.00 depth=0.00 yaw_error=+0.0deg
+[2026-07-22 19:22:07] [info] Crouch started: 1.0s policy blend, 4.0s depth ramp to 0.90.
+[2026-07-22 19:22:08] [info] Crouch phase=CROUCHING blend=1.00 depth=0.00 yaw_error=+7.0deg
+[2026-07-22 19:22:09] [info] Crouch phase=CROUCHING blend=1.00 depth=0.23 yaw_error=+14.1deg
+[2026-07-22 19:22:10] [info] Crouch phase=CROUCHING blend=1.00 depth=0.45 yaw_error=+70.8deg
+[2026-07-22 19:22:11] [info] Crouch phase=CROUCHING blend=1.00 depth=0.68 yaw_error=+41.9deg
+[2026-07-22 19:22:12] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+35.9deg
+[2026-07-22 19:22:13] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+40.1deg
+[2026-07-22 19:22:14] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+39.9deg
+[2026-07-22 19:22:15] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+40.1deg
+[2026-07-22 19:22:16] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+40.6deg
+[2026-07-22 19:22:17] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+41.2deg
+[2026-07-22 19:22:18] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+41.5deg
+[2026-07-22 19:22:19] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+41.8deg
+[2026-07-22 19:22:20] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+42.0deg
+[2026-07-22 19:22:21] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+42.2deg
+[2026-07-22 19:22:22] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+42.2deg
+[2026-07-22 19:22:23] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+42.3deg
+[2026-07-22 19:22:24] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+42.4deg
+[2026-07-22 19:22:25] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+42.4deg
+[2026-07-22 19:22:26] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+42.5deg
+[2026-07-22 19:22:27] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+42.5deg
+[2026-07-22 19:22:27] [info] FSM: Change state from Crouch to Passive
+[2026-07-22 19:22:32] [info] FSM: Change state from Passive to Velocity
+[2026-07-22 19:22:41] [info] FSM: Change state from Velocity to Passive
+[2026-07-22 19:22:54] [info] FSM: Change state from Passive to Velocity
+[2026-07-22 19:23:09] [info] FSM: Change state from Velocity to Crouch
+[2026-07-22 19:23:09] [info] Crouch phase=POLICY_BLEND blend=0.00 depth=0.00 yaw_error=+0.0deg
+[2026-07-22 19:23:09] [info] Crouch started: 1.0s policy blend, 4.0s depth ramp to 0.90.
+[2026-07-22 19:23:10] [info] Crouch phase=CROUCHING blend=1.00 depth=0.00 yaw_error=+6.8deg
+[2026-07-22 19:23:11] [info] Crouch phase=CROUCHING blend=1.00 depth=0.23 yaw_error=+92.0deg
+[2026-07-22 19:23:12] [info] Crouch phase=CROUCHING blend=1.00 depth=0.45 yaw_error=+79.9deg
+[2026-07-22 19:23:13] [info] Crouch phase=CROUCHING blend=1.00 depth=0.68 yaw_error=+69.2deg
+[2026-07-22 19:23:14] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+92.0deg
+[2026-07-22 19:23:15] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+91.7deg
+[2026-07-22 19:23:16] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+91.3deg
+[2026-07-22 19:23:17] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+91.2deg
+[2026-07-22 19:23:18] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+91.4deg
+[2026-07-22 19:23:19] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+91.8deg
+[2026-07-22 19:23:20] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+92.1deg
+[2026-07-22 19:23:21] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+92.4deg
+[2026-07-22 19:23:22] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+92.8deg
+[2026-07-22 19:26:10] [info] Waiting for connection to robot...
+[2026-07-22 19:26:10] [info] Connected to robot.
+[2026-07-22 19:26:10] [info] Initializing State_Passive ...
+[2026-07-22 19:26:10] [info] Initializing State_FixStand ...
+[2026-07-22 19:26:10] [info] Initializing State_Velocity ...
+[2026-07-22 19:26:10] [info] Policy directory: /home/soonogami/workspace/unitree_rl_mjlab/deploy/robots/g1/config/policy/velocity/v0
+[2026-07-22 19:26:10] [info] Initializing State_Crouch ...
+[2026-07-22 19:26:10] [info] Policy directory: /home/soonogami/workspace/unitree_rl_mjlab/deploy/robots/g1/config/policy/velocity/v0
+[2026-07-22 19:26:10] [info] Policy directory: /home/soonogami/workspace/unitree_rl_mjlab/deploy/robots/g1/config/policy/crouch/v0
+[2026-07-22 19:26:10] [info] Initializing State_Mimic_Dance1_subject2 ...
+[2026-07-22 19:26:10] [info] Policy directory: /home/soonogami/workspace/unitree_rl_mjlab/deploy/robots/g1/config/policy/mimic/dance1_subject2/
+[2026-07-22 19:26:10] [info] Loaded motion file 'dance1_subject2' with duration 131.48s
+[2026-07-22 19:26:10] [info] Initializing State_FixedPosture ...
+[2026-07-22 19:26:10] [info] FSM: Start Passive
+[2026-07-22 19:26:11] [info] FSM: Change state from Passive to Velocity
+[2026-07-22 19:26:34] [info] FSM: Change state from Velocity to Crouch
+[2026-07-22 19:26:34] [info] Crouch phase=POLICY_BLEND blend=0.00 depth=0.00 yaw_error=+0.0deg
+[2026-07-22 19:26:34] [info] Crouch started: 1.0s policy blend, 4.0s depth ramp to 0.90.
+[2026-07-22 19:26:35] [info] Crouch phase=CROUCHING blend=1.00 depth=0.00 yaw_error=+2.2deg
+[2026-07-22 19:26:36] [info] Crouch phase=CROUCHING blend=1.00 depth=0.23 yaw_error=+6.7deg
+[2026-07-22 19:26:37] [info] Crouch phase=CROUCHING blend=1.00 depth=0.45 yaw_error=+2.2deg
+[2026-07-22 19:26:38] [info] Crouch phase=CROUCHING blend=1.00 depth=0.68 yaw_error=+26.1deg
+[2026-07-22 19:26:39] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+46.9deg
+[2026-07-22 19:26:40] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+44.9deg
+[2026-07-22 19:26:41] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+42.6deg
+[2026-07-22 19:26:42] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+40.5deg
+[2026-07-22 19:26:43] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+38.8deg
+[2026-07-22 19:26:44] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+37.1deg
+[2026-07-22 19:26:45] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+35.7deg
+[2026-07-22 19:26:46] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+34.6deg
+[2026-07-22 19:26:47] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+33.5deg
+[2026-07-22 19:26:48] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+32.7deg
+[2026-07-22 19:26:49] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+32.1deg
+[2026-07-22 19:26:50] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+31.1deg
+[2026-07-22 19:48:42] [info] Waiting for connection to robot...
+[2026-07-22 19:48:42] [info] Connected to robot.
+[2026-07-22 19:48:42] [info] Initializing State_Passive ...
+[2026-07-22 19:48:42] [info] Initializing State_FixStand ...
+[2026-07-22 19:48:42] [info] Initializing State_Velocity ...
+[2026-07-22 19:48:42] [info] Policy directory: /home/soonogami/workspace/unitree_rl_mjlab/deploy/robots/g1/config/policy/velocity/v0
+[2026-07-22 19:48:42] [info] Initializing State_Crouch ...
+[2026-07-22 19:48:42] [info] Policy directory: /home/soonogami/workspace/unitree_rl_mjlab/deploy/robots/g1/config/policy/velocity/v0
+[2026-07-22 19:48:42] [info] Policy directory: /home/soonogami/workspace/unitree_rl_mjlab/deploy/robots/g1/config/policy/crouch/v0
+[2026-07-22 19:48:42] [info] Initializing State_Mimic_Dance1_subject2 ...
+[2026-07-22 19:48:42] [info] Policy directory: /home/soonogami/workspace/unitree_rl_mjlab/deploy/robots/g1/config/policy/mimic/dance1_subject2/
+[2026-07-22 19:48:42] [info] Loaded motion file 'dance1_subject2' with duration 131.48s
+[2026-07-22 19:48:42] [info] Initializing State_FixedPosture ...
+[2026-07-22 19:48:42] [info] Initializing State_Stand ...
+[2026-07-22 19:48:42] [info] Policy directory: /home/soonogami/workspace/unitree_rl_mjlab/deploy/robots/g1/config/policy/velocity/v0
+[2026-07-22 19:48:43] [info] FSM: Start Passive
+[2026-07-22 19:48:48] [info] FSM: Change state from Passive to Stand
+[2026-07-22 19:49:06] [info] FSM: Change state from Stand to Crouch
+[2026-07-22 19:49:06] [info] Crouch started: 0.3s wait, 2.0s policy blend, 4.0s depth ramp to 0.90.
+[2026-07-22 19:49:06] [info] Crouch phase=POLICY_BLEND blend=0.00 depth=0.00 yaw_error=+0.0deg
+[2026-07-22 19:49:07] [info] Crouch phase=POLICY_BLEND blend=0.30 depth=0.00 yaw_error=+0.3deg
+[2026-07-22 19:49:08] [info] Crouch phase=CROUCHING blend=0.95 depth=0.00 yaw_error=+4.7deg
+[2026-07-22 19:49:09] [info] Crouch phase=CROUCHING blend=1.00 depth=0.16 yaw_error=+97.1deg
+[2026-07-22 19:49:10] [info] Crouch phase=CROUCHING blend=1.00 depth=0.39 yaw_error=-160.8deg
+[2026-07-22 19:49:11] [info] Crouch phase=CROUCHING blend=1.00 depth=0.62 yaw_error=-73.8deg
+[2026-07-22 19:49:12] [info] Crouch phase=CROUCHING blend=1.00 depth=0.84 yaw_error=+4.5deg
+[2026-07-22 19:49:13] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+38.9deg
+[2026-07-22 19:49:14] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+34.5deg
+[2026-07-22 19:49:15] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+41.2deg
+[2026-07-22 19:49:16] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+63.8deg
+[2026-07-22 19:49:17] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+64.2deg
+[2026-07-22 19:49:18] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+74.2deg
+[2026-07-22 19:49:19] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+95.1deg
+[2026-07-22 19:49:20] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+97.8deg
+[2026-07-22 19:49:21] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+120.7deg
+[2026-07-22 19:49:22] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+121.0deg
+[2026-07-22 19:49:23] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+133.5deg
+[2026-07-22 19:49:24] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+147.4deg
+[2026-07-22 19:49:25] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+155.8deg
+[2026-07-22 19:49:26] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=-177.4deg
+[2026-07-22 19:49:27] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+178.1deg
+[2026-07-22 19:58:16] [info] Waiting for connection to robot...
+[2026-07-22 19:58:16] [info] Connected to robot.
+[2026-07-22 19:58:16] [info] Initializing State_Passive ...
+[2026-07-22 19:58:16] [info] Initializing State_FixStand ...
+[2026-07-22 19:58:16] [info] Initializing State_Velocity ...
+[2026-07-22 19:58:16] [info] Policy directory: /home/soonogami/workspace/unitree_rl_mjlab/deploy/robots/g1/config/policy/velocity/v0
+[2026-07-22 19:58:16] [info] Initializing State_Crouch ...
+[2026-07-22 19:58:16] [info] Policy directory: /home/soonogami/workspace/unitree_rl_mjlab/deploy/robots/g1/config/policy/velocity/v0
+[2026-07-22 19:58:16] [info] Policy directory: /home/soonogami/workspace/unitree_rl_mjlab/deploy/robots/g1/config/policy/crouch/v0
+[2026-07-22 19:58:16] [info] Initializing State_Mimic_Dance1_subject2 ...
+[2026-07-22 19:58:16] [info] Policy directory: /home/soonogami/workspace/unitree_rl_mjlab/deploy/robots/g1/config/policy/mimic/dance1_subject2/
+[2026-07-22 19:58:16] [info] Loaded motion file 'dance1_subject2' with duration 131.48s
+[2026-07-22 19:58:16] [info] Initializing State_FixedPosture ...
+[2026-07-22 19:58:16] [info] Initializing State_Stand ...
+[2026-07-22 19:58:16] [info] Policy directory: /home/soonogami/workspace/unitree_rl_mjlab/deploy/robots/g1/config/policy/velocity/v0
+[2026-07-22 19:58:16] [info] FSM: Start Passive
+[2026-07-22 19:58:18] [info] FSM: Change state from Passive to Stand
+[2026-07-22 19:58:37] [info] FSM: Change state from Stand to Crouch
+[2026-07-22 19:58:37] [info] Crouch started: 0.3s wait, 2.0s policy blend, 4.0s depth ramp to 0.90.
+[2026-07-22 19:58:37] [info] Crouch phase=POLICY_BLEND blend=0.00 depth=0.00 yaw_error=+0.0deg
+[2026-07-22 19:58:38] [info] Crouch phase=POLICY_BLEND blend=0.30 depth=0.00 yaw_error=-0.0deg
+[2026-07-22 19:58:39] [info] Crouch phase=CROUCHING blend=0.95 depth=0.00 yaw_error=+1.2deg
+[2026-07-22 19:58:40] [info] Crouch phase=CROUCHING blend=1.00 depth=0.16 yaw_error=+123.7deg
+[2026-07-22 19:58:41] [info] Crouch phase=CROUCHING blend=1.00 depth=0.39 yaw_error=-24.2deg
+[2026-07-22 19:58:42] [info] Crouch phase=CROUCHING blend=1.00 depth=0.61 yaw_error=+66.1deg
+[2026-07-22 19:58:43] [info] Crouch phase=CROUCHING blend=1.00 depth=0.84 yaw_error=+79.1deg
+[2026-07-22 19:58:44] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+98.0deg
+[2026-07-22 19:58:45] [info] Crouch phase=HOLD blend=1.00 depth=0.90 yaw_error=+114.9deg
+[2026-07-22 20:05:05] [info] Waiting for connection to robot...
+[2026-07-22 20:05:07] [warning] Waiting for connection rt/lowstate
+[2026-07-22 20:05:31] [info] Connected rt/lowstate
+[2026-07-22 20:05:31] [info] Connected to robot.
+[2026-07-22 20:05:31] [info] Initializing State_Passive ...
+[2026-07-22 20:05:31] [info] Initializing State_FixStand ...
+[2026-07-22 20:05:31] [info] Initializing State_Velocity ...
+[2026-07-22 20:05:31] [info] Policy directory: /home/soonogami/workspace/unitree_rl_mjlab/deploy/robots/g1/config/policy/velocity/v0
+[2026-07-22 20:05:31] [info] Initializing State_Crouch ...
+[2026-07-22 20:05:31] [info] Policy directory: /home/soonogami/workspace/unitree_rl_mjlab/deploy/robots/g1/config/policy/velocity/v0
+[2026-07-22 20:05:31] [info] Policy directory: /home/soonogami/workspace/unitree_rl_mjlab/deploy/robots/g1/config/policy/crouch/v0
+[2026-07-22 20:05:31] [info] Initializing State_Mimic_Dance1_subject2 ...
+[2026-07-22 20:05:31] [info] Policy directory: /home/soonogami/workspace/unitree_rl_mjlab/deploy/robots/g1/config/policy/mimic/dance1_subject2/
+[2026-07-22 20:05:31] [info] Loaded motion file 'dance1_subject2' with duration 131.48s
+[2026-07-22 20:05:31] [info] Initializing State_FixedPosture ...
+[2026-07-22 20:05:31] [info] Initializing State_Stand ...
+[2026-07-22 20:05:31] [info] Policy directory: /home/soonogami/workspace/unitree_rl_mjlab/deploy/robots/g1/config/policy/velocity/v0
+[2026-07-22 20:05:31] [info] FSM: Start Passive
+[2026-07-22 20:05:37] [info] FSM: Change state from Passive to Stand
+[2026-07-22 20:05:45] [info] FSM: Change state from Stand to Passive
+[2026-07-22 20:07:10] [info] FSM: Change state from Passive to Stand
+[2026-07-22 20:07:15] [info] FSM: Change state from Stand to Passive
+[2026-07-22 20:07:21] [info] FSM: Change state from Passive to Stand
+[2026-07-22 20:07:26] [info] FSM: Change state from Stand to Passive
+[2026-07-22 20:07:32] [info] FSM: Change state from Passive to Stand
+[2026-07-22 20:07:43] [info] FSM: Change state from Stand to Velocity
+[2026-07-22 20:08:17] [info] FSM: Change state from Velocity to Passive
+[2026-07-22 20:13:26] [info] FSM: Change state from Passive to Stand
+[2026-07-22 23:02:19] [info] FSM: Change state from Stand to Passive

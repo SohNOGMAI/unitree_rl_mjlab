@@ -3,7 +3,9 @@
 
 #pragma once
 
+#include <algorithm>
 #include <unitree/common/thread/recurrent_thread.hpp>
+#include <chrono>
 #include "BaseState.h"
 #include <spdlog/spdlog.h>
 #include <yaml-cpp/yaml.h>
@@ -45,11 +47,38 @@ public:
         }
     }
 
-    void start() 
+    void start(const std::string& initial_state = "Passive",
+               const std::string& automatic_next_state = "",
+               double automatic_transition_delay_s = 3.0,
+               const std::string& automatic_second_state = "",
+               double automatic_second_delay_s = 10.0)
     {
-        // Start From State_Passive
-        currentState = states[0];
+        currentState = nullptr;
+        for (auto& state : states)
+        {
+            if (state->getStateString() == initial_state)
+            {
+                currentState = state;
+                break;
+            }
+        }
+        if (!currentState)
+        {
+            throw std::runtime_error("FSM: Unknown initial state " + initial_state);
+        }
         currentState->enter();
+        automatic_transitions_.clear();
+        if (!automatic_next_state.empty()) {
+            automatic_transitions_.push_back(
+                {automatic_transition_delay_s, automatic_next_state});
+        }
+        if (!automatic_second_state.empty()) {
+            automatic_transitions_.push_back(
+                {automatic_second_delay_s, automatic_second_state});
+        }
+        std::sort(automatic_transitions_.begin(), automatic_transitions_.end());
+        automatic_transition_index_ = 0;
+        automatic_transition_start_ = std::chrono::steady_clock::now();
 
         fsm_thread_ = std::make_shared<unitree::common::RecurrentThread>(
             "FSM", 0, this->dt * 1e6, &CtrlFSM::run_, this);
@@ -96,6 +125,37 @@ private:
             }
         }
 
+        if (nextStateMode == 0 &&
+            automatic_transition_index_ < automatic_transitions_.size())
+        {
+            const double elapsed = std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - automatic_transition_start_).count();
+            const auto& transition =
+                automatic_transitions_[automatic_transition_index_];
+            if (elapsed >= transition.first)
+            {
+                const std::string requested_state = transition.second;
+                ++automatic_transition_index_;
+                bool found = false;
+                for (auto& state : states)
+                {
+                    if (state->getStateString() == requested_state)
+                    {
+                        nextStateMode = state->getState();
+                        spdlog::info("FSM: Automatic simulation-test transition requested: {}",
+                                     requested_state);
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found)
+                {
+                    spdlog::error("FSM: Unknown automatic transition state {}",
+                                  requested_state);
+                }
+            }
+        }
+
         if(nextStateMode != 0 && !currentState->isState(nextStateMode))
         {
             for(auto & state : states)
@@ -114,4 +174,7 @@ private:
 
     std::shared_ptr<BaseState> currentState;
     unitree::common::RecurrentThreadPtr fsm_thread_;
+    std::vector<std::pair<double, std::string>> automatic_transitions_;
+    std::size_t automatic_transition_index_ = 0;
+    std::chrono::steady_clock::time_point automatic_transition_start_;
 };

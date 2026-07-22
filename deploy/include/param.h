@@ -130,6 +130,17 @@ inline po::variables_map helper(int argc, char** argv)
         ("version,v", "show version")
         ("log", "record log file")
         ("network,n", po::value<std::string>()->default_value(""), "dds network interface")
+        ("domain-id", po::value<int>()->default_value(0), "DDS domain ID")
+        ("initial-state", po::value<std::string>()->default_value("Passive"),
+         "initial FSM state (non-Passive is permitted only on loopback for simulation tests)")
+        ("auto-transition-state", po::value<std::string>()->default_value(""),
+         "one-shot automatic FSM transition (loopback simulation tests only)")
+        ("auto-transition-delay-s", po::value<double>()->default_value(3.0),
+         "delay before the automatic simulation-test transition")
+        ("auto-second-transition-state", po::value<std::string>()->default_value(""),
+         "second automatic FSM transition (loopback simulation tests only)")
+        ("auto-second-transition-delay-s", po::value<double>()->default_value(10.0),
+         "delay from controller start to the second simulation-test transition")
         ;
 
     po::variables_map vm;
