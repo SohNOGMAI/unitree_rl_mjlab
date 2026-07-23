@@ -150,6 +150,27 @@ int main(int argc, char** argv)
         << "software stop -> Passive\n";
 
     std::cout
+        << "PC terminal: [1]         "
+        << "Passive -> zero-command stand policy\n";
+
+    std::cout
+        << "PC terminal: [2]         "
+        << "stand/walking policy -> crouch policy\n";
+
+    std::cout
+        << "PC terminal: [Shift+F]   "
+        << "supported stand/crouch -> fixed suspension posture "
+        << "(HARNESS ONLY)\n";
+
+    std::cout
+        << "PC terminal: [4]         "
+        << "Passive -> FixStand or crouch/fixed posture -> FixStand\n";
+
+    std::cout
+        << "PC terminal: [5]         "
+        << "stand/FixStand -> joystick walking policy\n";
+
+    std::cout
         << "WARNING: software Passive is not an "
         << "independent hardware E-stop.\n";
 

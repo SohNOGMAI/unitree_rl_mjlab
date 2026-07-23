@@ -32,6 +32,9 @@ FSM:
       Stand: LT + up.on_pressed
       # Retained as a manual recovery/pose test, but not used at startup.
       FixStand: LT + X.on_pressed
+    keyboard_transitions:
+      Stand: "1"
+      FixStand: "4"
     mode: [
       1,1,1,1,1,1,
       1,1,1,1,1,1,
@@ -52,6 +55,8 @@ FSM:
     transitions: 
       Passive: LT + B.on_pressed
       Velocity: RT + A.on_pressed
+    keyboard_transitions:
+      Velocity: "5"
 
     kp: [
       100,100,100,150,40,40,
@@ -84,6 +89,8 @@ FSM:
       Passive: LT + B.on_pressed
       Crouch: RT + B.on_pressed
       Mimic_Dance1_subject2: RB + A.on_pressed
+    keyboard_transitions:
+      Crouch: "2"
 
     policy_dir: config/policy/velocity
 
@@ -96,6 +103,12 @@ FSM:
       # After the wire/harness has visibly started supporting the robot.
       # Kept separate from the winch command to avoid an accidental pose jump.
       FixedPosture: RB + Y.on_pressed
+    keyboard_transitions:
+      Velocity: "5"
+      Crouch: "2"
+      # Uppercase F is intentionally harder to press accidentally.  Use only
+      # after the independent harness/wire visibly supports the robot.
+      FixedPosture: "F"
 
     # Same walking actor as Velocity, but with commands and gait phase fixed
     # exactly to zero.  This is independent of gamepad axis calibration.
@@ -111,6 +124,9 @@ FSM:
       FixStand: RT + X.on_pressed
       # Test this transition only while the robot is supported by a harness.
       FixedPosture: RT + Y.on_pressed
+    keyboard_transitions:
+      FixStand: "4"
+      FixedPosture: "F"
 
     walking_policy_dir: config/policy/velocity
     crouch_policy_dir: config/policy/crouch
@@ -143,6 +159,8 @@ FSM:
     transitions:
       Passive: LT + B.on_pressed
       FixStand: RT + X.on_pressed
+    keyboard_transitions:
+      FixStand: "4"
 
     # Ascend mode's experimentally selected wide_lift pose.  It is not a
     # self-balancing standing pose; use it only when the harness/wire supports

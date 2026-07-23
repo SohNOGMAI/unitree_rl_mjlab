@@ -44,6 +44,49 @@ public:
             }
         }
 
+        // Optional PC-terminal transitions.  These are deliberately defined
+        // per state in config.yaml, so a key cannot jump to a state that is
+        // unsafe from the current one.  The global SPACE -> Passive check is
+        // inserted ahead of these checks below.
+        auto keyboard_transitions =
+            param::config["FSM"][state_string]["keyboard_transitions"];
+        if(keyboard_transitions)
+        {
+            auto transition_map =
+                keyboard_transitions.as<std::map<std::string, std::string>>();
+            for(const auto& transition : transition_map)
+            {
+                const std::string& target_fsm = transition.first;
+                const std::string key = transition.second;
+                if(!FSMStringMap.right.count(target_fsm))
+                {
+                    spdlog::warn(
+                        "FSM State_'{}' not found for PC keyboard transition!",
+                        target_fsm
+                    );
+                    continue;
+                }
+                const int fsm_id = FSMStringMap.right.at(target_fsm);
+                registered_checks.emplace_back(
+                    std::make_pair(
+                        [key, target_fsm]()->bool {
+                            if(keyboard && keyboard->on_pressed &&
+                               keyboard->key() == key)
+                            {
+                                spdlog::warn(
+                                    "PC state command '{}' requested -> {}",
+                                    key, target_fsm
+                                );
+                                return true;
+                            }
+                            return false;
+                        },
+                        fsm_id
+                    )
+                );
+            }
+        }
+
         // register for all states
         registered_checks.emplace_back(
             std::make_pair(

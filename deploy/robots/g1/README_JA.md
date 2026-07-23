@@ -48,6 +48,27 @@
 ソフトウェア停止です。通信断やPC停止に備える独立した物理E-stopの代用には
 なりません。
 
+Unitree純正コントローラを使わず、`g1_ctrl`を実行しているPCターミナル
+から状態を変更することもできます。
+
+| 現在の状態 | PCキー | 次の状態 |
+|---|---|---|
+| Passive | `1` | Stand（速度0の立位ポリシー） |
+| Passive | `4` | FixStand（姿勢試験用） |
+| Stand | `2` | Crouch |
+| Stand | `5` | Velocity |
+| Stand（完全支持後） | `Shift+F` | FixedPosture |
+| Velocity | `2` | Crouch |
+| Crouch | `4` | FixStand |
+| Crouch（完全支持後） | `Shift+F` | FixedPosture |
+| FixedPosture | `4` | FixStand |
+| Passive以外 | `Space` | Passive |
+
+`F`は大文字なので、Shiftを押しながら`F`を押します。FixedPostureは
+自立制御ではありません。ワイヤーまたは独立ハーネスが機体荷重を受けた
+ことを目視確認してからだけ使用します。キーは`g1_ctrl`のターミナルへ
+フォーカスがある場合だけ有効です。
+
 深くしゃがんだ状態から歩行ポリシーへ直接切り替えると、目標角が急変して
 転倒しやすくなります。そのため `Crouch -> FixStand -> Velocity` の順で
 戻します。
